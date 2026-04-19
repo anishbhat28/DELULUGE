@@ -147,11 +147,18 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
     background: #f3ecfc !important;
 }
 [data-testid="stFileUploaderDropzoneInstructions"] {
-    color: #4e4260 !important;
+    color: #8b6fd4 !important;
 }
 [data-testid="stFileUploaderDropzoneInstructions"] span,
-[data-testid="stFileUploaderDropzoneInstructions"] small {
-    color: #9a8fa6 !important;
+[data-testid="stFileUploaderDropzoneInstructions"] small,
+[data-testid="stFileUploaderDropzoneInstructions"] * {
+    color: #8b6fd4 !important;
+}
+[data-testid="stFileUploaderDropzone"] p,
+[data-testid="stFileUploaderDropzone"] span,
+[data-testid="stFileUploaderDropzone"] div,
+[data-testid="stFileUploaderDropzone"] small {
+    color: #8b6fd4 !important;
 }
 [data-testid="stFileUploaderDropzoneInstructions"] svg {
     fill: #a894e0 !important;
@@ -167,6 +174,17 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 [data-testid="stFileUploader"] button:hover {
     background: #e0d4fa !important;
 }
+/* Uploaded file name text */
+[data-testid="stFileUploader"] span,
+[data-testid="stFileUploader"] p,
+[data-testid="stFileUploader"] div,
+[data-testid="stFileUploader"] small,
+[data-testid="stFileUploaderFile"] span,
+[data-testid="stFileUploaderFile"] *,
+[data-testid="stUploadedFile"] span,
+[data-testid="stUploadedFile"] * {
+    color: #8b6fd4 !important;
+}
 
 [data-testid="stTextArea"] textarea {
     border: 1.5px solid #cfc0f5 !important;
@@ -174,6 +192,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
     background: #fdf9ff !important;
     font-family: 'Inter', sans-serif !important;
     font-size: .9rem !important; color: #3b3040 !important;
+    caret-color: #000 !important;
     transition: border-color .15s, box-shadow .15s !important;
 }
 [data-testid="stTextArea"] textarea:focus {
