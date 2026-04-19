@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Large data / model artifacts (exceed GitHub 100MB limit)
+data/processed/
+outputs/*.npz
+checkpoints/*.pt

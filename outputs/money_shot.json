@@ -1,0 +1,46 @@
+{
+  "timestep": 2553,
+  "simulation_day": 14060,
+  "score": 13.925029754638672,
+  "mean_error_mm": 5.657064437866211,
+  "mean_disag_mm": 4.153203010559082,
+  "mean_eke": 1.6643363770496578e-11,
+  "rank_all": "1 of 2866",
+  "top_5_candidates": [
+    {
+      "timestep": 2553,
+      "simulation_day": 14060,
+      "score": 13.925029754638672,
+      "mean_error_mm": 5.657064437866211,
+      "mean_disag_mm": 4.153203010559082
+    },
+    {
+      "timestep": 2552,
+      "simulation_day": 14059,
+      "score": 13.911674499511719,
+      "mean_error_mm": 5.658007621765137,
+      "mean_disag_mm": 4.150404930114746
+    },
+    {
+      "timestep": 2554,
+      "simulation_day": 14061,
+      "score": 13.705429077148438,
+      "mean_error_mm": 5.573498725891113,
+      "mean_disag_mm": 4.111053466796875
+    },
+    {
+      "timestep": 2551,
+      "simulation_day": 14058,
+      "score": 13.627298355102539,
+      "mean_error_mm": 5.538656711578369,
+      "mean_disag_mm": 4.1143012046813965
+    },
+    {
+      "timestep": 2559,
+      "simulation_day": 14066,
+      "score": 13.58994197845459,
+      "mean_error_mm": 5.211525917053223,
+      "mean_disag_mm": 4.342142581939697
+    }
+  ]
+}
