@@ -35,18 +35,19 @@ import uuid
 import numpy as np
 from scipy import stats
 
-# Anthropic SDK
+# Gemini SDK
 try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
+    from google import genai
+    from google.genai import types
+    GEMINI_AVAILABLE = True
 except ImportError:
-    ANTHROPIC_AVAILABLE = False
+    GEMINI_AVAILABLE = False
 
 
 # ---------- Config ----------
 DISCOVERY_FRAC = 0.7   # fraction of test set the agent can query
 BUDGET = 10            # max hypotheses the agent can test
-MODEL_NAME = "claude-sonnet-4-5"  # fast + strong tool use
+MODEL_NAME = "gemini-2.5-flash"
 
 # State for tool-call receipts (filled during run)
 TOOL_CALL_LOG = []
@@ -239,18 +240,17 @@ def validate_regime(data, regime_type, comparator, value):
         return {"call_id": call_id, "status": "error", "error": str(e)}
 
 
-# ---------- Anthropic tool schemas ----------
-CLAUDE_TOOLS = [
+# ---------- Gemini tool schemas ----------
+GEMINI_TOOLS = [
     {
         "name": "evaluate_regime",
         "description": (
             "Test whether the surrogate's absolute error is systematically higher inside "
             "a specified physical regime than outside it. Uses a held-out DISCOVERY split "
             "of the test data so you can test multiple hypotheses freely here — later "
-            "they'll be validated on a separate split. "
-            "Returns error_ratio (>1 means error is higher inside) and p_value_discovery."
+            "they'll be validated on a separate split."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "regime_type": {
@@ -308,55 +308,66 @@ in high-EKE regions, vortex cores, and large-anomaly timesteps — these are phy
 where the surrogate is expected to struggle."""
 
 
-def run_claude_loop(data, api_key):
-    """Run the Claude-driven hypothesis generation loop."""
-    client = anthropic.Anthropic(api_key=api_key)
+def run_gemini_loop(data, api_key):
+    """Run the Gemini-driven hypothesis generation loop."""
+    client = genai.Client(api_key=api_key)
 
-    messages = [
-        {
-            "role": "user",
-            "content": (
+    function_declarations = []
+    for tool in GEMINI_TOOLS:
+        function_declarations.append(types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool["description"],
+            parameters=tool["parameters"],
+        ))
+
+    tools = [types.Tool(function_declarations=function_declarations)]
+    config = types.GenerateContentConfig(
+        tools=tools,
+        system_instruction=SYSTEM_PROMPT,
+        temperature=0.7,
+    )
+
+    history = [
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=(
                 f"Begin your investigation. You have a budget of {BUDGET} evaluate_regime calls. "
                 f"Propose hypotheses and call the tool to test them. When you're done, "
                 f"output a summary of the candidate regimes you want to validate."
-            ),
-        }
+            ))]
+        )
     ]
 
     candidates = []
-    max_turns = BUDGET + 6
 
-    for turn in range(max_turns):
-        response = client.messages.create(
+    for turn in range(BUDGET + 4):
+        response = client.models.generate_content(
             model=MODEL_NAME,
-            max_tokens=2048,
-            system=SYSTEM_PROMPT,
-            tools=CLAUDE_TOOLS,
-            messages=messages,
+            contents=history,
+            config=config,
         )
 
-        # Print Claude's reasoning
-        for block in response.content:
-            if block.type == "text" and block.text.strip():
-                print(f"\n[Agent turn {turn}] {block.text[:600]}")
+        candidate = response.candidates[0]
+        history.append(candidate.content)
 
-        # Collect tool calls in this turn
-        tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+        tool_calls = []
+        text_parts = []
+        for part in candidate.content.parts:
+            if hasattr(part, "function_call") and part.function_call:
+                tool_calls.append(part.function_call)
+            if hasattr(part, "text") and part.text:
+                text_parts.append(part.text)
 
-        # Append assistant message to history
-        messages.append({"role": "assistant", "content": response.content})
+        if text_parts:
+            print(f"\n[Agent turn {turn}] {''.join(text_parts)[:500]}")
 
-        if not tool_use_blocks:
-            # No tools called; either done or final response
-            if response.stop_reason == "end_turn":
-                print("\n[Agent finished]")
-                break
+        if not tool_calls:
+            break
 
-        # Run each tool and append results
-        tool_results = []
-        for tu in tool_use_blocks:
-            args = tu.input
-            print(f"  -> Tool call ({tu.id}): evaluate_regime({args})")
+        tool_responses = []
+        for call in tool_calls:
+            args = dict(call.args)
+            print(f"  -> Tool call: evaluate_regime({args})")
             result = evaluate_regime(data, **args)
             er = result.get("error_ratio")
             pv = result.get("p_value_discovery")
@@ -373,26 +384,27 @@ def run_claude_loop(data, api_key):
                     "discovery": result,
                 })
 
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tu.id,
-                "content": json.dumps(result),
-            })
+            tool_responses.append(types.Part.from_function_response(
+                name="evaluate_regime",
+                response={"result": result},
+            ))
 
-        messages.append({"role": "user", "content": tool_results})
+        history.append(types.Content(role="user", parts=tool_responses))
 
         if len(TOOL_CALL_LOG) >= BUDGET:
-            messages.append({
-                "role": "user",
-                "content": f"Budget exhausted ({BUDGET} calls used). Summarize your findings now, no more tool calls.",
-            })
-            final_response = client.messages.create(
+            history.append(types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=(
+                    f"Budget exhausted ({BUDGET} calls used). Summarize your findings."
+                ))]
+            ))
+            response = client.models.generate_content(
                 model=MODEL_NAME,
-                max_tokens=1024,
-                system=SYSTEM_PROMPT,
-                messages=messages,
+                contents=history,
+                config=config,
             )
-            final_text = "".join(b.text for b in final_response.content if b.type == "text")
+            final_text = "".join(p.text for p in response.candidates[0].content.parts
+                                 if hasattr(p, "text") and p.text)
             print(f"\n[Final summary]\n{final_text}")
             break
 
@@ -463,20 +475,20 @@ def describe_regime(finding):
 
 
 def main():
-    if not ANTHROPIC_AVAILABLE:
-        print("ERROR: anthropic not installed. Run:")
-        print("  pip install anthropic scipy")
+    if not GEMINI_AVAILABLE:
+        print("ERROR: google-genai not installed. Run:")
+        print("  pip install google-genai scipy")
         return
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("ERROR: set ANTHROPIC_API_KEY environment variable.")
-        print("  export ANTHROPIC_API_KEY='your-key-here'")
+        print("ERROR: set GEMINI_API_KEY environment variable.")
+        print("  export GEMINI_API_KEY='your-key-here'")
         return
 
     print("=" * 70)
     print("AUTORESEARCH LOOP — physical regime failure-mode discovery")
-    print(f"  Agent: Claude ({MODEL_NAME})")
+    print(f"  Agent: Gemini ({MODEL_NAME})")
     print("=" * 70)
 
     data = load_data()
@@ -485,7 +497,7 @@ def main():
 
     # Discovery phase
     print("\n--- DISCOVERY PHASE (agent proposes and tests hypotheses) ---")
-    candidates = run_claude_loop(data, api_key)
+    candidates = run_gemini_loop(data, api_key)
     print(f"\nDiscovery yielded {len(candidates)} candidate regimes.")
 
     # Validation phase
