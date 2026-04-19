@@ -473,7 +473,7 @@ except Exception as _e:
                 bar.progress(100, text="Complete! Opening dashboard…")
                 st.session_state.last_run_sig = current_sig
                 time.sleep(0.6)
-                st.switch_page("dashboard.py")
+                st.switch_page("pages/dashboard.py")
         except Exception as e:
             st.markdown(f"""
             <div class="resp-error">
