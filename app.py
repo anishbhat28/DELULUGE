@@ -32,6 +32,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 }
 
 #MainMenu, footer, header { visibility: hidden; }
+[data-testid="stSidebarNav"], [data-testid="stSidebar"] { display: none !important; }
 .block-container { padding-top: 0 !important; max-width: 760px !important; }
 
 /* ── Nav ── */

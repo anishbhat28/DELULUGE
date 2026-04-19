@@ -22,6 +22,15 @@ st.set_page_config(
     layout="wide",
 )
 
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebarNav"], [data-testid="stSidebar"] { display: none !important; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 DATA_CANDIDATES = ["predictions.csv", "data.csv"]
 FINDINGS_PATH = "outputs/findings.json"
