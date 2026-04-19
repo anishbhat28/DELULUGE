@@ -1,10 +1,14 @@
 import os
+from pathlib import Path
+
 import streamlit as st
 from werkzeug.utils import secure_filename
 
+from automated_preprocessing import run_pipeline
+
 UPLOAD_FOLDER = "uploads"
 ALLOWED_DATA_EXTENSIONS  = {"csv", "json", "xlsx", "txt", "parquet"}
-ALLOWED_MODEL_EXTENSIONS = {"pkl", "joblib", "h5", "pt", "pth", "onnx", "bin", "model"}
+ALLOWED_MODEL_EXTENSIONS = {"py"}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -267,15 +271,15 @@ st.markdown("""
   </div>
   <div class="card-body">
     <div class="steps">
-      <div class="step"><div class="step-num">1</div><div class="step-label">Upload Model</div></div>
+      <div class="step"><div class="step-num">1</div><div class="step-label">Training Script</div></div>
       <div class="step"><div class="step-num">2</div><div class="step-label">Upload Data</div></div>
       <div class="step"><div class="step-num">3</div><div class="step-label">Write Prompt</div></div>
     </div>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="field-label">Model File <span style="color:#e08898">*</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="field-hint">Accepted: pkl · joblib · h5 · pt · pth · onnx · bin · model</div>', unsafe_allow_html=True)
-modelfile = st.file_uploader("Model file", type=list(ALLOWED_MODEL_EXTENSIONS), key="model")
+st.markdown('<div class="field-label">Training Script <span style="color:#e08898">*</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="field-hint">Upload your train.py (or equivalent Python training script)</div>', unsafe_allow_html=True)
+modelfile = st.file_uploader("Training script", type=list(ALLOWED_MODEL_EXTENSIONS), key="model")
 
 st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
 
@@ -324,23 +328,38 @@ if run:
             path = os.path.join(UPLOAD_FOLDER, fname)
             with open(path, "wb") as out:
                 out.write(f.getbuffer())
-            return fname
+            return Path(path)
 
-        model_filename = save_upload(modelfile)
-        data_filename  = save_upload(datafile)
+        train_path = save_upload(modelfile)
+        data_path  = save_upload(datafile)
+        output_path = Path(UPLOAD_FOLDER) / "program.md"
 
-        # TODO: pass model_path, data_path, and prompt to your GPT pipeline here
-        # result = run_gpt_pipeline(model_path=..., data_path=..., prompt=prompt)
-
-        st.markdown(f"""
-        <div class="resp-success">
-          <div class="resp-success-header">✓ Request received</div>
-          <div class="resp-body">
-            <div class="resp-row"><span class="resp-key">Model</span><span class="resp-val">{model_filename}</span></div>
-            <div class="resp-row"><span class="resp-key">Data</span><span class="resp-val">{data_filename}</span></div>
-            <div class="resp-row"><span class="resp-key">Prompt</span><span class="resp-val">{prompt.strip()}</span></div>
-            <div class="resp-row"><span class="resp-key">Status</span><span class="resp-val">Files received. GPT pipeline integration pending.</span></div>
-          </div>
-        </div>""", unsafe_allow_html=True)
+        with st.spinner("Running preprocessing pipeline…"):
+            try:
+                program_md = run_pipeline(
+                    train_path=train_path,
+                    data_path=data_path,
+                    user_prompt=prompt.strip(),
+                    output_path=output_path,
+                )
+                st.markdown("""
+                <div class="resp-success">
+                  <div class="resp-success-header">✓ program.md generated</div>
+                </div>""", unsafe_allow_html=True)
+                st.markdown("**Generated program.md**")
+                st.markdown(program_md)
+                with open(output_path, "rb") as f:
+                    st.download_button(
+                        label="Download program.md",
+                        data=f,
+                        file_name="program.md",
+                        mime="text/markdown",
+                    )
+            except Exception as e:
+                st.markdown(f"""
+                <div class="resp-error">
+                  <div class="resp-error-header">Error</div>
+                  <div class="resp-body">{e}</div>
+                </div>""", unsafe_allow_html=True)
 
 st.markdown('<div class="site-footer">Model Diagnostics &middot; Research Tool &middot; 2026</div>', unsafe_allow_html=True)
