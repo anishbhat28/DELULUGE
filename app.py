@@ -4,7 +4,8 @@ from pathlib import Path
 import streamlit as st
 from werkzeug.utils import secure_filename
 
-from automated_preprocessing import run_pipeline
+from automated_preprocessing import extract_train_context, extract_data_features, build_prompt, run_pipeline
+from openai import OpenAI as _OpenAI
 
 UPLOAD_FOLDER = "uploads"
 ALLOWED_DATA_EXTENSIONS  = {"csv", "json", "xlsx", "txt", "parquet"}
@@ -14,31 +15,19 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 st.set_page_config(page_title="Model Diagnostics", page_icon="📊", layout="centered")
 
+if "last_run_sig" not in st.session_state:
+    st.session_state.last_run_sig = None
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
 html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 
-/*
-  Pastel palette on cream
-  --cream:      #faf6ee   page background
-  --card:       #fffdf9   card surface
-  --lavender:   #a894e0   primary pastel (soft purple)
-  --lavender-d: #8b6fd4   deeper lavender for text/button
-  --lavender-t: #f0ebfc   lavender tint (hover, header)
-  --peach:      #f9c9b0   accent warm
-  --sage:       #a8d5b8   success
-  --rose:       #f4afc0   error
-  --text-dark:  #3b3040   warm near-black
-  --text-mid:   #7a6e84   muted body text
-  --text-light: #b0a6ba   placeholder / hints
-  --border:     #e4d9f5   light lavender border
-*/
-
 .stApp {
     background: #faf6ee !important;
     min-height: 100vh;
+    position: relative !important;
 }
 
 #MainMenu, footer, header { visibility: hidden; }
@@ -141,44 +130,27 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 }
 [data-testid="stFileUploader"] label { display: none !important; }
 
-/* Override the dark inner dropzone */
 [data-testid="stFileUploaderDropzone"] {
     background: #faf5ff !important;
     border: none !important;
     border-radius: 10px !important;
 }
-[data-testid="stFileUploaderDropzone"]:hover {
-    background: #f3ecfc !important;
-}
-[data-testid="stFileUploaderDropzoneInstructions"] {
-    color: #8b6fd4 !important;
-}
+[data-testid="stFileUploaderDropzone"]:hover { background: #f3ecfc !important; }
+
+[data-testid="stFileUploaderDropzoneInstructions"] { color: #8b6fd4 !important; }
 [data-testid="stFileUploaderDropzoneInstructions"] span,
 [data-testid="stFileUploaderDropzoneInstructions"] small,
-[data-testid="stFileUploaderDropzoneInstructions"] * {
-    color: #8b6fd4 !important;
-}
+[data-testid="stFileUploaderDropzoneInstructions"] * { color: #8b6fd4 !important; }
 [data-testid="stFileUploaderDropzone"] p,
 [data-testid="stFileUploaderDropzone"] span,
 [data-testid="stFileUploaderDropzone"] div,
-[data-testid="stFileUploaderDropzone"] small {
-    color: #8b6fd4 !important;
-}
-[data-testid="stFileUploaderDropzoneInstructions"] svg {
-    fill: #a894e0 !important;
-    color: #a894e0 !important;
-}
+[data-testid="stFileUploaderDropzone"] small { color: #8b6fd4 !important; }
+[data-testid="stFileUploaderDropzoneInstructions"] svg { fill: #a894e0 !important; color: #a894e0 !important; }
 [data-testid="stFileUploader"] button {
-    background: #ede5fc !important;
-    color: #4e3a80 !important;
-    border: 1px solid #d0c2f0 !important;
-    border-radius: 6px !important;
-    font-weight: 600 !important;
+    background: #ede5fc !important; color: #4e3a80 !important;
+    border: 1px solid #d0c2f0 !important; border-radius: 6px !important; font-weight: 600 !important;
 }
-[data-testid="stFileUploader"] button:hover {
-    background: #e0d4fa !important;
-}
-/* Uploaded file name text */
+[data-testid="stFileUploader"] button:hover { background: #e0d4fa !important; }
 [data-testid="stFileUploader"] span,
 [data-testid="stFileUploader"] p,
 [data-testid="stFileUploader"] div,
@@ -186,9 +158,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 [data-testid="stFileUploaderFile"] span,
 [data-testid="stFileUploaderFile"] *,
 [data-testid="stUploadedFile"] span,
-[data-testid="stUploadedFile"] * {
-    color: #8b6fd4 !important;
-}
+[data-testid="stUploadedFile"] * { color: #8b6fd4 !important; }
 
 [data-testid="stTextArea"] textarea {
     border: 1.5px solid #cfc0f5 !important;
@@ -226,16 +196,15 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 /* ── Response panels ── */
 .resp-success { border: 1.5px solid #a8d5b8; border-radius: 8px; overflow: hidden; margin-top: 20px; }
 .resp-success-header { background: #d8f2e4; color: #3a8a5c; padding: 10px 16px; font-size: .83rem; font-weight: 600; }
-
 .resp-error { border: 1.5px solid #f4afc0; border-radius: 8px; overflow: hidden; margin-top: 20px; }
 .resp-error-header { background: #fce8ef; color: #c05070; padding: 10px 16px; font-size: .83rem; font-weight: 600; }
-
 .resp-body { background: #fffdf9; padding: 16px; font-size: .85rem; line-height: 1.7; color: #4e4260; }
 .resp-row { display: flex; gap: 10px; margin-bottom: 5px; }
 .resp-key { font-weight: 600; color: #a894e0; min-width: 80px; font-size: .78rem; text-transform: uppercase; letter-spacing: .3px; }
 .resp-val { color: #3b3040; }
 
 .site-footer { text-align: center; padding: 16px 0 24px; font-size: .75rem; color: #c4b8d0; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -255,7 +224,7 @@ st.markdown("""
 <div class="hero">
   <div class="hero-eyebrow">AI-Powered Analysis</div>
   <h1>Interpret Your <span>Model Output</span></h1>
-  <p>Upload a trained model and a dataset, then describe what you want to know.<br>GPT will handle the interpretation.</p>
+  <p>Upload a trained model and a dataset, then describe what you want to know.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -298,9 +267,15 @@ prompt = st.text_area(
     max_chars=2000,
 )
 
-st.markdown('</div></div>', unsafe_allow_html=True)  # close card-body + card
+st.markdown('</div></div>', unsafe_allow_html=True)
 
-run = st.button("Run Analysis →")
+current_sig = (
+    modelfile.name if modelfile else None,
+    datafile.name if datafile else None,
+    prompt.strip(),
+)
+already_run = current_sig == st.session_state.last_run_sig
+run = st.button("Run Analysis →", disabled=already_run)
 
 if run:
     errors = []
@@ -330,36 +305,42 @@ if run:
                 out.write(f.getbuffer())
             return Path(path)
 
-        train_path = save_upload(modelfile)
-        data_path  = save_upload(datafile)
-        output_path = Path(UPLOAD_FOLDER) / "program.md"
+        train_path  = save_upload(modelfile)
+        data_path   = save_upload(datafile)
+        output_path = Path(__file__).parent / "program.md"
 
-        with st.spinner("Running preprocessing pipeline…"):
-            try:
-                program_md = run_pipeline(
-                    train_path=train_path,
-                    data_path=data_path,
-                    user_prompt=prompt.strip(),
-                    output_path=output_path,
-                )
-                st.markdown("""
-                <div class="resp-success">
-                  <div class="resp-success-header">✓ program.md generated</div>
-                </div>""", unsafe_allow_html=True)
-                st.markdown("**Generated program.md**")
-                st.markdown(program_md)
-                with open(output_path, "rb") as f:
-                    st.download_button(
-                        label="Download program.md",
-                        data=f,
-                        file_name="program.md",
-                        mime="text/markdown",
-                    )
-            except Exception as e:
-                st.markdown(f"""
-                <div class="resp-error">
-                  <div class="resp-error-header">Error</div>
-                  <div class="resp-body">{e}</div>
-                </div>""", unsafe_allow_html=True)
+        try:
+            bar = st.progress(0, text="Saving uploaded files…")
+            bar.progress(15, text="Parsing training script…")
+            train_context = extract_train_context(train_path)
+            bar.progress(38, text="Extracting data features…")
+            data_features = extract_data_features(data_path)
+            bar.progress(58, text="Building prompt…")
+            prompt_text = build_prompt(train_context, prompt.strip(), data_features)
+            bar.progress(72, text="Calling GPT API — this may take a moment…")
+            _client = _OpenAI()
+            response = _client.responses.create(model="gpt-5.4", input=prompt_text)
+            program_md = response.output_text.strip()
+            if program_md.startswith("```"):
+                lines = program_md.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                program_md = "\n".join(lines).strip()
+            bar.progress(94, text="Writing output…")
+            output_path.write_text(program_md, encoding="utf-8")
+            bar.progress(100, text="Complete!")
+            st.session_state.last_run_sig = current_sig
+            st.markdown("""
+            <div class="resp-success">
+              <div class="resp-success-header">✓ program.md saved</div>
+            </div>""", unsafe_allow_html=True)
+        except Exception as e:
+            st.markdown(f"""
+            <div class="resp-error">
+              <div class="resp-error-header">Error</div>
+              <div class="resp-body">{e}</div>
+            </div>""", unsafe_allow_html=True)
 
-st.markdown('<div class="site-footer">Model Diagnostics &middot; Research Tool &middot; 2026</div>', unsafe_allow_html=True)
+    st.markdown('<div class="site-footer">Model Diagnostics &middot; Research Tool &middot; 2026</div>', unsafe_allow_html=True)
