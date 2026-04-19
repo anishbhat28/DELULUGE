@@ -311,6 +311,51 @@ if run:
         data_path = save_upload(datafile, project_root / f"data.{data_ext}")
         output_path = project_root / "program.md"
 
+        # Contract shims — make the uploaded train.py produce predictions.csv
+        # and read whatever filename it hardcoded by aliasing common names.
+        import shutil as _shutil
+        for alias in ("combined_data.csv", "input_data.csv", "train_data.csv"):
+            _alias_path = project_root / alias
+            if not _alias_path.exists():
+                _shutil.copy(data_path, _alias_path)
+
+        _train_src = train_path.read_text(encoding="utf-8")
+        if "predictions.csv" not in _train_src:
+            _train_src += """
+
+# --- auto-injected predictions.csv writer (contract shim) ---
+try:
+    import pandas as _pd
+    from pathlib import Path as _Path
+    _g = globals()
+    _src_df = _g.get('df') if isinstance(_g.get('df'), _pd.DataFrame) else None
+    _feats = _g.get('features')
+    _preds_all = None
+    for _k in ('rf_preds_all', 'lr_preds_all', 'preds_all', 'predictions', 'y_pred'):
+        _v = _g.get(_k)
+        if _v is not None:
+            _preds_all = _v
+            break
+    _y_all = _g.get('y_all')
+    if _y_all is None and _src_df is not None:
+        for _k in ('sea_level_mm', 'target', 'y'):
+            if _k in _src_df.columns:
+                _y_all = _src_df[_k]
+                break
+    if _src_df is not None and _feats is not None and _preds_all is not None and _y_all is not None:
+        _keep = [c for c in (['year'] + list(_feats)) if c in _src_df.columns]
+        _out = _src_df[_keep].copy()
+        _out['target'] = _y_all.values if hasattr(_y_all, 'values') else _y_all
+        _out['prediction'] = _preds_all
+        _out.to_csv(_Path(__file__).parent / 'predictions.csv', index=False)
+        print(f"auto-injected: wrote predictions.csv ({len(_out)} rows)")
+    else:
+        print("auto-inject skipped: could not locate df/features/preds/y_all in globals")
+except Exception as _e:
+    print(f"auto-inject skipped: {_e}")
+"""
+            train_path.write_text(_train_src, encoding="utf-8")
+
         try:
             bar = st.progress(0, text="Saving uploaded files…")
             bar.progress(8, text="Parsing training script…")

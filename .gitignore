@@ -13,6 +13,9 @@ checkpoints/*.pt
 
 # Runtime artifacts from the upload pipeline (app.py overwrites these on run)
 /data.csv
+/combined_data.csv
+/input_data.csv
+/train_data.csv
 /predictions.csv
 /program.md
 /uploads/
