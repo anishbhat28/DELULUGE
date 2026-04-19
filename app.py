@@ -117,6 +117,11 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 /* ── Labels ── */
 .field-label { font-size: .83rem; font-weight: 600; color: #4e4260; margin-bottom: 2px; }
 .field-hint  { font-size: .76rem; color: #9a8fa6; margin-bottom: 6px; }
+.field-hint code, .resp-body code {
+    background: #ede8fa; color: #6b4fc8;
+    border: 1px solid #d4c6f0; border-radius: 4px;
+    padding: 1px 6px; font-size: .75rem; font-family: 'Inter', monospace;
+}
 
 /* ── Streamlit widget overrides ── */
 [data-testid="stFileUploader"] {
@@ -214,7 +219,7 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 st.markdown("""
 <div class="nav">
   <div class="nav-left">
-    <span class="nav-title">Climodelity</span>
+    <span class="nav-badge">Climodelity</span>
   </div>
   <span class="nav-badge">Research Tool</span>
 </div>
