@@ -2,40 +2,34 @@
 autoresearch.py
 ===============
 
-Grounded autoresearch loop for physical-regime failure-mode discovery.
+Grounded autoresearch loop for generic tabular failure-mode discovery.
 
 Flow:
-    1. Gemini proposes a hypothesis in natural language.
-    2. Gemini calls a tool to convert the hypothesis to a concrete spatial
-       mask over (t, y, x).
-    3. The tool computes inside-vs-outside error on a DISCOVERY split and
-       returns the result. All numbers come from executed code.
-    4. Accepted hypotheses are re-tested on a held-out VALIDATION split
+    1. Gemini proposes a regime hypothesis in natural language.
+    2. Gemini calls a tool to test it on a DISCOVERY split.
+    3. Accepted hypotheses are re-tested on a held-out VALIDATION split
        the agent never saw during generation.
-    5. Bonferroni correction applied to the total hypothesis count.
-    6. Output: outputs/findings.json, a list of validated regimes with
-       their tool-call IDs (receipts).
+    4. Bonferroni correction applied to the total hypothesis count.
+    5. Output: outputs/findings.json.
 
-Design choices that make this ours:
-    - Physical-oceanography hypothesis language (EKE, Okubo-Weiss, LC extent,
-      anomaly magnitude), not generic ML diagnostics.
-    - Narrow, typed domain tools — the agent cannot run arbitrary Python.
-    - Train/validation split for hypothesis selection to prevent overfitting.
-    - Bonferroni multiple-testing correction.
-    - Every reported finding carries the tool_call_id that computed it.
+Data source: a tabular CSV of predictions + targets (+ optional features),
+loaded via rmse_regimes.load_tabular. Regime fields are provided by
+rmse_regimes.compute_regime_fields — see that file for the contract.
 
-Attribution: inspired by Karpathy autoresearch, Sakana AI Scientist, Anthropic
-agentic research patterns. Written from scratch for DataHacks 2026.
+Usage:
+    python autoresearch.py [--data path/to/data.csv]
 """
 
+import argparse
 import json
 import os
-import time
 import uuid
+
 import numpy as np
 from scipy import stats
 
-# Gemini SDK
+from rmse_regimes import compute_regime_fields, load_tabular
+
 try:
     from google import genai
     from google.genai import types
@@ -44,309 +38,218 @@ except ImportError:
     GEMINI_AVAILABLE = False
 
 
-# ---------- Config ----------
-DISCOVERY_FRAC = 0.7   # fraction of test set the agent can query
-BUDGET = 10            # max hypotheses the agent can test
+DISCOVERY_FRAC = 0.7
+BUDGET = 10
 MODEL_NAME = "gemini-2.5-flash"
 
-# State for tool-call receipts (filled during run)
-TOOL_CALL_LOG = []
+TOOL_CALL_LOG: list[dict] = []
 
 
-# ---------- Data loading ----------
-def load_data():
-    preds = np.load("outputs/test_predictions.npz")
-    regimes = np.load("outputs/test_regimes.npz")
-    ocean = ~preds["land_mask"]
-    std = float(preds["std_norm"])
-    T = preds["abs_error"].shape[0]
-    cutoff = int(T * DISCOVERY_FRAC)
-
+def load_data(data_path: str) -> dict:
+    bundle = load_tabular(data_path)
+    regimes = compute_regime_fields(bundle)
+    n = int(len(bundle["target"]))
+    rng = np.random.default_rng(42)
+    perm = rng.permutation(n)
+    cutoff = int(n * DISCOVERY_FRAC)
     return {
-        "abs_error": preds["abs_error"],       # (T, H, W) normalized
-        "disag": preds["ensemble_std"],        # (T, H, W) normalized
-        "eke": regimes["eke"],                 # (T, H, W)
-        "ow": regimes["ow"],                   # (T, H, W)
-        "lc_extent": regimes["lc_extent"],     # (T,)
-        "anom_mag": regimes["anom_mag"],       # (T,)
-        "ocean": ocean,
-        "std": std,
-        "T": T,
-        "discovery_end": cutoff,
-        "validation_start": cutoff,
+        "abs_error": bundle["abs_error"],
+        "regimes": regimes,
+        "disc_idx": perm[:cutoff],
+        "val_idx": perm[cutoff:],
+        "n": n,
+        "regime_field_names": list(regimes.keys()),
+        "feature_names": list(bundle["features"].columns),
+        "target_col": bundle["target_col"],
+        "pred_col": bundle["pred_col"],
     }
 
 
-# ---------- Tool implementations ----------
-def build_regime_mask(data, regime_type, comparator, value, split):
-    """
-    Build a boolean mask over (T_split, H, W) selecting pixels in the regime.
+def build_mask(data: dict, regime_field: str, comparator: str, value: float, split: str):
+    if regime_field not in data["regimes"]:
+        raise ValueError(
+            f"unknown regime_field '{regime_field}'. Available: {data['regime_field_names']}"
+        )
+    idx = data["disc_idx"] if split == "discovery" else data["val_idx"]
+    field = data["regimes"][regime_field][idx]
 
-    regime_type: "eke", "ow_negative", "anom_percentile", "lc_extent"
-    comparator: "gt", "lt", "sign" (for OW)
-    value: numeric threshold OR percentile (0-100)
-    split: "discovery" or "validation"
-
-    Returns:
-        mask: (T_split, H_ocean_flat) bool
-        meta: dict with threshold info
-    """
-    if split == "discovery":
-        t0, t1 = 0, data["discovery_end"]
-    elif split == "validation":
-        t0, t1 = data["validation_start"], data["T"]
+    if comparator == "percentile_gt":
+        thresh = float(np.percentile(field, value))
+        mask = field > thresh
+        meta = {"threshold": thresh, "percentile": value}
+    elif comparator == "percentile_lt":
+        thresh = float(np.percentile(field, value))
+        mask = field < thresh
+        meta = {"threshold": thresh, "percentile": value}
+    elif comparator == "gt":
+        mask = field > value
+        meta = {"threshold": float(value)}
+    elif comparator == "lt":
+        mask = field < value
+        meta = {"threshold": float(value)}
+    elif comparator == "eq":
+        mask = field == value
+        meta = {"threshold": float(value)}
     else:
-        raise ValueError(f"bad split {split}")
-
-    ocean = data["ocean"]
-
-    if regime_type == "eke":
-        field = data["eke"][t0:t1][:, ocean]  # (T_s, N_ocean)
-        if comparator == "percentile_gt":
-            thresh = np.percentile(field, value)
-            mask = field > thresh
-            meta = {"threshold_value": float(thresh), "percentile": value}
-        else:
-            raise ValueError(f"EKE needs percentile_gt, got {comparator}")
-
-    elif regime_type == "ow_negative":
-        field = data["ow"][t0:t1][:, ocean]
-        mask = field < 0
-        meta = {"threshold_value": 0.0, "description": "vortex-core regions"}
-
-    elif regime_type == "ow_positive":
-        field = data["ow"][t0:t1][:, ocean]
-        mask = field > 0
-        meta = {"threshold_value": 0.0, "description": "strain-dominated regions"}
-
-    elif regime_type == "anom_percentile":
-        # per-timestep scalar; broadcasts across spatial dim
-        scalar = data["anom_mag"][t0:t1]  # (T_s,)
-        thresh = np.percentile(scalar, value)
-        per_t = scalar > thresh  # (T_s,)
-        # Broadcast to (T_s, N_ocean)
-        N_ocean = int(ocean.sum())
-        mask = np.broadcast_to(per_t[:, None], (t1 - t0, N_ocean))
-        meta = {"threshold_value": float(thresh), "percentile": value}
-
-    elif regime_type == "lc_extent":
-        scalar = data["lc_extent"][t0:t1]
-        if comparator == "gt":
-            per_t = scalar > value  # timesteps with extent > value
-        else:
-            per_t = scalar < value
-        N_ocean = int(ocean.sum())
-        mask = np.broadcast_to(per_t[:, None], (t1 - t0, N_ocean))
-        meta = {"threshold_value": float(value), "comparator": comparator}
-    else:
-        raise ValueError(f"unknown regime_type {regime_type}")
-
-    return mask, meta
+        raise ValueError(f"unknown comparator '{comparator}'")
+    return mask, meta, idx
 
 
-def evaluate_regime(data, regime_type, comparator, value):
-    """
-    TOOL. Evaluates whether error is higher inside a regime than outside.
-
-    Called by the agent. Returns a structured result including a tool_call_id.
-    """
+def _regime_test(data: dict, regime_field: str, comparator: str, value: float, split: str, call_type: str) -> dict:
     call_id = str(uuid.uuid4())[:8]
     try:
-        mask, meta = build_regime_mask(data, regime_type, comparator, value, "discovery")
-        err = data["abs_error"][0:data["discovery_end"]][:, data["ocean"]]  # (T_d, N_ocean)
-
+        mask, meta, idx = build_mask(data, regime_field, comparator, value, split)
+        err = data["abs_error"][idx]
         inside = err[mask]
         outside = err[~mask]
-
-        if inside.size < 100 or outside.size < 100:
+        if inside.size < 5 or outside.size < 5:
             result = {
                 "call_id": call_id,
                 "status": "insufficient_data",
                 "n_inside": int(inside.size),
                 "n_outside": int(outside.size),
             }
-            TOOL_CALL_LOG.append({"call_id": call_id, "type": "evaluate_regime",
-                                  "input": {"regime_type": regime_type, "comparator": comparator,
-                                            "value": value},
-                                  "output": result})
-            return result
-
-        # Welch's t-test (unequal variances)
-        t_stat, p_val = stats.ttest_ind(inside, outside, equal_var=False)
-        std_norm = data["std"]
-        result = {
+        else:
+            t_stat, p_val = stats.ttest_ind(inside, outside, equal_var=False)
+            result = {
+                "call_id": call_id,
+                "status": "ok",
+                "regime_field": regime_field,
+                "comparator": comparator,
+                "value": value,
+                "meta": meta,
+                "n_inside": int(inside.size),
+                "n_outside": int(outside.size),
+                "mean_err_inside": float(inside.mean()),
+                "mean_err_outside": float(outside.mean()),
+                "error_ratio": float(inside.mean() / (outside.mean() + 1e-12)),
+                "t_statistic": float(t_stat),
+                "p_value": float(p_val),
+            }
+        TOOL_CALL_LOG.append({
             "call_id": call_id,
-            "status": "ok",
-            "regime_type": regime_type,
-            "comparator": comparator,
-            "value": value,
-            "meta": meta,
-            "n_inside": int(inside.size),
-            "n_outside": int(outside.size),
-            "mean_err_inside_mm": float(inside.mean() * std_norm * 1000),
-            "mean_err_outside_mm": float(outside.mean() * std_norm * 1000),
-            "error_ratio": float(inside.mean() / (outside.mean() + 1e-12)),
-            "t_statistic": float(t_stat),
-            "p_value_discovery": float(p_val),
-        }
-        TOOL_CALL_LOG.append({"call_id": call_id, "type": "evaluate_regime",
-                              "input": {"regime_type": regime_type, "comparator": comparator,
-                                        "value": value},
-                              "output": result})
+            "type": call_type,
+            "input": {"regime_field": regime_field, "comparator": comparator, "value": value},
+            "output": result,
+        })
         return result
     except Exception as e:
         result = {"call_id": call_id, "status": "error", "error": str(e)}
-        TOOL_CALL_LOG.append({"call_id": call_id, "type": "evaluate_regime", "error": str(e)})
+        TOOL_CALL_LOG.append({"call_id": call_id, "type": call_type, "error": str(e)})
         return result
 
 
-def validate_regime(data, regime_type, comparator, value):
-    """
-    TOOL. Re-runs the regime test on the held-out VALIDATION split the
-    agent never saw during discovery. This is the anti-p-hacking gate.
-    """
-    call_id = str(uuid.uuid4())[:8]
-    try:
-        mask, meta = build_regime_mask(data, regime_type, comparator, value, "validation")
-        err = data["abs_error"][data["validation_start"]:data["T"]][:, data["ocean"]]
-
-        inside = err[mask]
-        outside = err[~mask]
-
-        if inside.size < 100 or outside.size < 100:
-            result = {"call_id": call_id, "status": "insufficient_data"}
-            TOOL_CALL_LOG.append({"call_id": call_id, "type": "validate_regime",
-                                  "output": result})
-            return result
-
-        t_stat, p_val = stats.ttest_ind(inside, outside, equal_var=False)
-        std_norm = data["std"]
-        result = {
-            "call_id": call_id,
-            "status": "ok",
-            "n_inside_val": int(inside.size),
-            "n_outside_val": int(outside.size),
-            "mean_err_inside_mm": float(inside.mean() * std_norm * 1000),
-            "mean_err_outside_mm": float(outside.mean() * std_norm * 1000),
-            "error_ratio": float(inside.mean() / (outside.mean() + 1e-12)),
-            "p_value_validation": float(p_val),
-        }
-        TOOL_CALL_LOG.append({"call_id": call_id, "type": "validate_regime",
-                              "input": {"regime_type": regime_type, "comparator": comparator,
-                                        "value": value},
-                              "output": result})
-        return result
-    except Exception as e:
-        return {"call_id": call_id, "status": "error", "error": str(e)}
+def evaluate_regime(data, regime_field, comparator, value):
+    """TOOL. Evaluate on discovery split."""
+    r = _regime_test(data, regime_field, comparator, value, "discovery", "evaluate_regime")
+    # surface the key the agent reads as p_value_discovery for clarity
+    if r.get("status") == "ok":
+        r["p_value_discovery"] = r["p_value"]
+    return r
 
 
-# ---------- Gemini tool schemas ----------
-GEMINI_TOOLS = [
-    {
-        "name": "evaluate_regime",
-        "description": (
-            "Test whether the surrogate's absolute error is systematically higher inside "
-            "a specified physical regime than outside it. Uses a held-out DISCOVERY split "
-            "of the test data so you can test multiple hypotheses freely here — later "
-            "they'll be validated on a separate split."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "regime_type": {
-                    "type": "string",
-                    "enum": ["eke", "ow_negative", "ow_positive", "anom_percentile", "lc_extent"],
-                    "description": (
-                        "eke: eddy kinetic energy, high values = energetic region. "
-                        "ow_negative: Okubo-Weiss < 0, inside vortex cores. "
-                        "ow_positive: Okubo-Weiss > 0, strain/frontal zones. "
-                        "anom_percentile: timesteps with high domain-mean SSH anomaly. "
-                        "lc_extent: timesteps when Loop Current extends to a given latitude."
-                    ),
-                },
-                "comparator": {
-                    "type": "string",
-                    "enum": ["percentile_gt", "gt", "lt"],
-                    "description": (
-                        "percentile_gt: value is 0-100 percentile (for eke, anom_percentile). "
-                        "gt or lt: value is a latitude threshold (for lc_extent). "
-                        "For ow_negative/ow_positive, comparator is ignored (pass 'gt')."
-                    ),
-                },
-                "value": {
-                    "type": "number",
-                    "description": "Threshold value. Percentile 0-100 or latitude in degrees.",
-                },
+def validate_regime(data, regime_field, comparator, value):
+    r = _regime_test(data, regime_field, comparator, value, "validation", "validate_regime")
+    if r.get("status") == "ok":
+        r["p_value_validation"] = r["p_value"]
+    return r
+
+
+def build_gemini_tools(data: dict):
+    """Build the Gemini function declaration, listing the regime fields this dataset exposes."""
+    field_list = "\n".join(f"  - {name}" for name in data["regime_field_names"])
+    description = (
+        "Test whether the model's absolute error is systematically higher inside "
+        "a specified regime than outside it. Uses a held-out DISCOVERY split of "
+        "the data so you can test multiple hypotheses here — validation happens "
+        "later on a separate split.\n\n"
+        "Available regime fields for this dataset:\n" + field_list
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "regime_field": {
+                "type": "string",
+                "enum": data["regime_field_names"],
+                "description": (
+                    "Regime field to slice on. 'target'/'prediction'/'abs_error'/"
+                    "'residual'/'residual_sign' are always available. 'feature::<col>' "
+                    "entries come from the uploaded CSV's numeric feature columns."
+                ),
             },
-            "required": ["regime_type", "comparator", "value"],
+            "comparator": {
+                "type": "string",
+                "enum": ["percentile_gt", "percentile_lt", "gt", "lt", "eq"],
+                "description": (
+                    "percentile_gt / percentile_lt: value is 0-100 percentile. "
+                    "gt / lt / eq: value is a raw threshold."
+                ),
+            },
+            "value": {
+                "type": "number",
+                "description": "Percentile 0-100 or raw threshold.",
+            },
         },
-    },
-]
+        "required": ["regime_field", "comparator", "value"],
+    }
+    return [{"name": "evaluate_regime", "description": description, "parameters": parameters}]
 
 
-SYSTEM_PROMPT = """You are an AI researcher investigating where a neural-network surrogate
-of Gulf of Mexico ocean dynamics fails. Your job is to propose and test physical-regime
-hypotheses about failure modes.
-
-Available regime types:
-  - eke (eddy kinetic energy): high values = energetic, eddy-dominated regions
-  - ow_negative: Okubo-Weiss < 0, inside vortex cores
-  - ow_positive: Okubo-Weiss > 0, strain-dominated regions and fronts
-  - anom_percentile: timesteps with large domain-mean SSH anomaly
-  - lc_extent: Loop Current northward extent at each timestep
-
-Your protocol:
-  1. Propose a hypothesis in plain English, grounded in ocean physics.
+SYSTEM_PROMPT_TEMPLATE = """You are an AI researcher investigating where a machine-learning model
+systematically makes larger absolute errors. You have access to a tabular dataset with
+target column '{target_col}', prediction column '{pred_col}', and these numeric feature
+columns: {feature_cols}.
+{user_focus}
+Protocol:
+  1. Propose a hypothesis in plain English, grounded in the data.
   2. Call the evaluate_regime tool to test it on the discovery split.
-  3. Read the result. Look at mean_err_inside_mm, mean_err_outside_mm, error_ratio, p_value_discovery.
-  4. If an effect is meaningful (error_ratio > 1.2 and p_value < 0.001), note it as a candidate.
-  5. Propose another hypothesis — try different regime types or thresholds.
-  6. After exhausting your budget, summarize the candidate regimes you want to validate.
+  3. Look at mean_err_inside, mean_err_outside, error_ratio, p_value_discovery.
+  4. If error_ratio > 1.2 and p_value_discovery < 0.001, note it as a candidate.
+  5. Propose another hypothesis — try different regime fields / comparators / thresholds.
+  6. When your budget is spent, summarize the candidate regimes you want validated.
 
-Be curious. Try at least one hypothesis for each regime type. Be especially interested
-in high-EKE regions, vortex cores, and large-anomaly timesteps — these are physically
-where the surrogate is expected to struggle."""
+Be systematic: test high-error vs low-error regions, extreme-target percentiles,
+extreme-prediction percentiles, residual_sign (over- vs under-prediction bias),
+and each feature::<col> where a monotonic error trend is plausible."""
 
 
-def run_gemini_loop(data, api_key):
-    """Run the Gemini-driven hypothesis generation loop."""
+def run_gemini_loop(data, api_key, user_prompt: str = ""):
     client = genai.Client(api_key=api_key)
 
-    function_declarations = []
-    for tool in GEMINI_TOOLS:
-        function_declarations.append(types.FunctionDeclaration(
-            name=tool["name"],
-            description=tool["description"],
-            parameters=tool["parameters"],
-        ))
-
+    tool_specs = build_gemini_tools(data)
+    function_declarations = [
+        types.FunctionDeclaration(name=t["name"], description=t["description"], parameters=t["parameters"])
+        for t in tool_specs
+    ]
     tools = [types.Tool(function_declarations=function_declarations)]
+
+    focus_block = (
+        f"\nThe user has specifically asked:\n  {user_prompt.strip()}\n"
+        "Let that question steer which regimes you prioritize, but still test broadly.\n"
+        if user_prompt.strip() else ""
+    )
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        target_col=data["target_col"],
+        pred_col=data["pred_col"],
+        feature_cols=(", ".join(data["feature_names"]) or "(none)"),
+        user_focus=focus_block,
+    )
     config = types.GenerateContentConfig(
-        tools=tools,
-        system_instruction=SYSTEM_PROMPT,
-        temperature=0.7,
+        tools=tools, system_instruction=system_prompt, temperature=0.7,
     )
 
-    history = [
-        types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=(
-                f"Begin your investigation. You have a budget of {BUDGET} evaluate_regime calls. "
-                f"Propose hypotheses and call the tool to test them. When you're done, "
-                f"output a summary of the candidate regimes you want to validate."
-            ))]
-        )
-    ]
-
+    history = [types.Content(
+        role="user",
+        parts=[types.Part.from_text(text=(
+            f"Begin your investigation. You have a budget of {BUDGET} evaluate_regime calls. "
+            f"Propose hypotheses and call the tool to test them. When you're done, "
+            f"output a summary of the candidate regimes you want to validate."
+        ))]
+    )]
     candidates = []
 
     for turn in range(BUDGET + 4):
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=history,
-            config=config,
-        )
-
+        response = client.models.generate_content(model=MODEL_NAME, contents=history, config=config)
         candidate = response.candidates[0]
         history.append(candidate.content)
 
@@ -378,7 +281,7 @@ def run_gemini_loop(data, api_key):
                     and result.get("error_ratio", 0) > 1.2
                     and result.get("p_value_discovery", 1) < 0.001):
                 candidates.append({
-                    "regime_type": args["regime_type"],
+                    "regime_field": args["regime_field"],
                     "comparator": args["comparator"],
                     "value": args["value"],
                     "discovery": result,
@@ -391,20 +294,18 @@ def run_gemini_loop(data, api_key):
 
         history.append(types.Content(role="user", parts=tool_responses))
 
-        if len(TOOL_CALL_LOG) >= BUDGET:
+        if len([c for c in TOOL_CALL_LOG if c.get("type") == "evaluate_regime"]) >= BUDGET:
             history.append(types.Content(
                 role="user",
                 parts=[types.Part.from_text(text=(
                     f"Budget exhausted ({BUDGET} calls used). Summarize your findings."
                 ))]
             ))
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=history,
-                config=config,
+            response = client.models.generate_content(model=MODEL_NAME, contents=history, config=config)
+            final_text = "".join(
+                p.text for p in response.candidates[0].content.parts
+                if hasattr(p, "text") and p.text
             )
-            final_text = "".join(p.text for p in response.candidates[0].content.parts
-                                 if hasattr(p, "text") and p.text)
             print(f"\n[Final summary]\n{final_text}")
             break
 
@@ -412,7 +313,6 @@ def run_gemini_loop(data, api_key):
 
 
 def validate_and_report(data, candidates):
-    """Re-test each candidate on validation split and apply Bonferroni correction."""
     n_tests = len(candidates)
     if n_tests == 0:
         print("No candidate regimes survived discovery.")
@@ -424,15 +324,13 @@ def validate_and_report(data, candidates):
 
     validated = []
     for c in candidates:
-        val_result = validate_regime(
-            data, c["regime_type"], c["comparator"], c["value"]
-        )
+        val_result = validate_regime(data, c["regime_field"], c["comparator"], c["value"])
         if val_result.get("status") != "ok":
             continue
         p_val = val_result["p_value_validation"]
         is_validated = p_val < alpha_corrected and val_result["error_ratio"] > 1.1
-        finding = {
-            "regime_type": c["regime_type"],
+        validated.append({
+            "regime_field": c["regime_field"],
             "comparator": c["comparator"],
             "value": c["value"],
             "discovery": {
@@ -444,40 +342,37 @@ def validate_and_report(data, candidates):
             "validation": {
                 "error_ratio": val_result["error_ratio"],
                 "p_value": p_val,
-                "n_inside": val_result["n_inside_val"],
+                "n_inside": val_result["n_inside"],
                 "call_id": val_result["call_id"],
             },
-            "mean_err_inside_val_mm": val_result["mean_err_inside_mm"],
-            "mean_err_outside_val_mm": val_result["mean_err_outside_mm"],
+            "mean_err_inside_val": val_result["mean_err_inside"],
+            "mean_err_outside_val": val_result["mean_err_outside"],
             "bonferroni_alpha": alpha_corrected,
             "validated": bool(is_validated),
-        }
-        validated.append(finding)
-
+        })
     return validated
 
 
-def describe_regime(finding):
-    """Human-readable description of a regime."""
-    r = finding["regime_type"]
+def describe_regime(finding) -> str:
+    r = finding["regime_field"]
+    c = finding["comparator"]
     v = finding["value"]
-    if r == "eke":
-        return f"High eddy kinetic energy (top {100 - v:.0f}% of pixel-timesteps)"
-    if r == "ow_negative":
-        return "Vortex-core regions (Okubo-Weiss < 0)"
-    if r == "ow_positive":
-        return "Strain/frontal regions (Okubo-Weiss > 0)"
-    if r == "anom_percentile":
-        return f"Timesteps with high domain-mean SSH anomaly (top {100 - v:.0f}%)"
-    if r == "lc_extent":
-        return f"Timesteps when Loop Current extends {finding['comparator']} {v:.1f}°N"
-    return str(finding)
+    if c == "percentile_gt":
+        return f"{r} > {v:.1f} percentile"
+    if c == "percentile_lt":
+        return f"{r} < {v:.1f} percentile"
+    return f"{r} {c} {v}"
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", default="data.csv", help="Path to tabular CSV")
+    parser.add_argument("--prompt", default="", help="Optional user prompt to focus the agent")
+    args = parser.parse_args()
+
     if not GEMINI_AVAILABLE:
         print("ERROR: google-genai not installed. Run:")
-        print("  pip install google-genai scipy")
+        print("  pip install google-genai scipy pandas")
         return
 
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -487,24 +382,22 @@ def main():
         return
 
     print("=" * 70)
-    print("AUTORESEARCH LOOP — physical regime failure-mode discovery")
+    print("AUTORESEARCH LOOP — tabular failure-mode discovery")
     print(f"  Agent: Gemini ({MODEL_NAME})")
+    print(f"  Data:  {args.data}")
     print("=" * 70)
 
-    data = load_data()
-    print(f"Loaded data. Discovery split: t=0..{data['discovery_end']}, "
-          f"Validation: t={data['validation_start']}..{data['T']}")
+    data = load_data(args.data)
+    print(f"Loaded data: {data['n']} rows, {len(data['disc_idx'])} discovery / {len(data['val_idx'])} validation")
+    print(f"Regime fields exposed: {data['regime_field_names']}")
 
-    # Discovery phase
     print("\n--- DISCOVERY PHASE (agent proposes and tests hypotheses) ---")
-    candidates = run_gemini_loop(data, api_key)
+    candidates = run_gemini_loop(data, api_key, user_prompt=args.prompt)
     print(f"\nDiscovery yielded {len(candidates)} candidate regimes.")
 
-    # Validation phase
     print("\n--- VALIDATION PHASE (Bonferroni-corrected held-out test) ---")
     findings = validate_and_report(data, candidates)
 
-    # Report
     print("\n" + "=" * 70)
     print("FINAL FINDINGS")
     print("=" * 70)
@@ -514,22 +407,21 @@ def main():
     for f in findings:
         tag = "[VALIDATED]" if f["validated"] else "[rejected]"
         print(f"{tag} {describe_regime(f)}")
-        print(f"   Discovery err ratio: {f['discovery']['error_ratio']:.3f} "
-              f"(p={f['discovery']['p_value']:.2e})")
-        print(f"   Validation err ratio: {f['validation']['error_ratio']:.3f} "
-              f"(p={f['validation']['p_value']:.2e})")
-        print(f"   Mean error inside: {f['mean_err_inside_val_mm']:.2f} mm, "
-              f"outside: {f['mean_err_outside_val_mm']:.2f} mm")
-        print(f"   Receipts: discovery={f['discovery']['call_id']}, "
-              f"validation={f['validation']['call_id']}")
+        print(f"   Discovery err ratio: {f['discovery']['error_ratio']:.3f} (p={f['discovery']['p_value']:.2e})")
+        print(f"   Validation err ratio: {f['validation']['error_ratio']:.3f} (p={f['validation']['p_value']:.2e})")
+        print(f"   Mean error inside: {f['mean_err_inside_val']:.4g}, outside: {f['mean_err_outside_val']:.4g}")
+        print(f"   Receipts: discovery={f['discovery']['call_id']}, validation={f['validation']['call_id']}")
         print()
 
-    # Save
     os.makedirs("outputs", exist_ok=True)
     out = {
         "findings": findings,
         "tool_call_log": TOOL_CALL_LOG,
         "config": {
+            "data_path": args.data,
+            "target_col": data["target_col"],
+            "pred_col": data["pred_col"],
+            "feature_cols": data["feature_names"],
             "discovery_fraction": DISCOVERY_FRAC,
             "budget": BUDGET,
             "model": MODEL_NAME,
@@ -538,7 +430,7 @@ def main():
     }
     with open("outputs/findings.json", "w") as f:
         json.dump(out, f, indent=2, default=str)
-    print(f"Saved outputs/findings.json")
+    print("Saved outputs/findings.json")
 
 
 if __name__ == "__main__":
