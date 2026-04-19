@@ -82,6 +82,127 @@ c3.metric("Rows", f"{n:,}")
 c4.metric("Feature columns", f"{len(feature_names)}")
 
 
+# ---------- Atlas (spatial SSH view, ported from main branch) ----------
+ATLAS_PREDS = "outputs/test_predictions.npz"
+ATLAS_REGIMES = "outputs/test_regimes.npz"
+if os.path.exists(ATLAS_PREDS):
+    try:
+        _atlas_preds = np.load(ATLAS_PREDS)
+        _required = {"targets", "ensemble_mean", "ensemble_std", "abs_error",
+                     "land_mask", "lat", "lon", "std_norm"}
+        if _required.issubset(set(_atlas_preds.files)):
+            try:
+                import cmocean
+                _cmap_ssh = cmocean.cm.balance
+                _cmap_amp = cmocean.cm.amp
+            except ImportError:
+                _cmap_ssh = "RdBu_r"
+                _cmap_amp = "Reds"
+
+            _atlas_regimes = np.load(ATLAS_REGIMES) if os.path.exists(ATLAS_REGIMES) else None
+
+            _atlas = {
+                "targets": _atlas_preds["targets"],
+                "ensemble_mean": _atlas_preds["ensemble_mean"],
+                "ensemble_std": _atlas_preds["ensemble_std"],
+                "abs_error": _atlas_preds["abs_error"],
+                "land_mask": _atlas_preds["land_mask"],
+                "lat": _atlas_preds["lat"],
+                "lon": _atlas_preds["lon"],
+                "norm_std": float(_atlas_preds["std_norm"]),
+            }
+            _atlas_ocean = ~_atlas["land_mask"]
+            _T, _H, _W = _atlas["targets"].shape
+
+            def _default_t():
+                try:
+                    with open("outputs/money_shot.json") as _f:
+                        return int(json.load(_f)["timestep"])
+                except Exception:
+                    return _T // 2
+
+            st.header("The atlas — drag the slider to explore")
+            _t = st.slider(
+                "Test-set day index",
+                min_value=0, max_value=_T - 1, value=_default_t(), step=1,
+            )
+
+            def _mask_land(arr, land_mask):
+                out = arr.copy().astype(float)
+                out[land_mask] = np.nan
+                return out
+
+            _truth = _atlas["targets"][_t] * _atlas["norm_std"]
+            _pred = _atlas["ensemble_mean"][_t] * _atlas["norm_std"]
+            _disag = _atlas["ensemble_std"][_t] * _atlas["norm_std"]
+            _err = _atlas["abs_error"][_t] * _atlas["norm_std"]
+            _vmax_ssh = float(max(np.abs(_truth).max(), np.abs(_pred).max()))
+            _vmax_disag = float(_disag[_atlas_ocean].max())
+            _vmax_err = float(_err[_atlas_ocean].max())
+
+            _fig_atlas, _axes = plt.subplots(1, 4, figsize=(18, 4.5))
+            _extent = [_atlas["lon"].min(), _atlas["lon"].max(),
+                       _atlas["lat"].min(), _atlas["lat"].max()]
+
+            _im0 = _axes[0].imshow(_mask_land(_truth, _atlas["land_mask"]), cmap=_cmap_ssh,
+                                   origin="lower", extent=_extent,
+                                   vmin=-_vmax_ssh, vmax=_vmax_ssh, aspect="auto")
+            _axes[0].set_title("Truth SSH (m)")
+            plt.colorbar(_im0, ax=_axes[0], fraction=0.046, pad=0.04)
+
+            _im1 = _axes[1].imshow(_mask_land(_pred, _atlas["land_mask"]), cmap=_cmap_ssh,
+                                   origin="lower", extent=_extent,
+                                   vmin=-_vmax_ssh, vmax=_vmax_ssh, aspect="auto")
+            _axes[1].set_title("Ensemble mean prediction (m)")
+            plt.colorbar(_im1, ax=_axes[1], fraction=0.046, pad=0.04)
+
+            _im2 = _axes[2].imshow(_mask_land(_disag, _atlas["land_mask"]), cmap=_cmap_amp,
+                                   origin="lower", extent=_extent,
+                                   vmin=0, vmax=_vmax_disag, aspect="auto")
+            _axes[2].set_title("Disagreement (m) -- trust field")
+            plt.colorbar(_im2, ax=_axes[2], fraction=0.046, pad=0.04)
+
+            _im3 = _axes[3].imshow(_mask_land(_err, _atlas["land_mask"]), cmap=_cmap_amp,
+                                   origin="lower", extent=_extent,
+                                   vmin=0, vmax=_vmax_err, aspect="auto")
+            _axes[3].set_title("Absolute error (m)")
+            plt.colorbar(_im3, ax=_axes[3], fraction=0.046, pad=0.04)
+
+            for _ax in _axes:
+                _ax.set_xlabel("Longitude")
+                _ax.set_ylabel("Latitude")
+
+            _fig_atlas.suptitle(f"Test day index t = {_t}   |   simulation day ~ {11500 + 7 + _t}",
+                                fontsize=11, y=1.02)
+            _fig_atlas.tight_layout()
+            st.pyplot(_fig_atlas)
+            st.caption(
+                "Reading the atlas: left two panels should look nearly identical (truth vs. prediction). "
+                "Third panel shows where the ensemble is uncertain; fourth shows where it's actually wrong. "
+                "The scientific claim: these two fields should correlate. Drag the slider to verify."
+            )
+
+            if _atlas_regimes is not None and {"lc_extent", "anom_mag", "eke"}.issubset(set(_atlas_regimes.files)):
+                _r1, _r2, _r3 = st.columns(3)
+                _r1.metric(
+                    "Loop Current extent (this frame)",
+                    f"{_atlas_regimes['lc_extent'][_t]:.2f}°N",
+                    help="Northernmost latitude where SSH exceeds a high-anomaly contour in the eastern domain",
+                )
+                _r2.metric(
+                    "Domain anomaly magnitude (this frame)",
+                    f"{_atlas_regimes['anom_mag'][_t]*1000:.1f} mm",
+                    help="Mean absolute SSH anomaly over the ocean pixels",
+                )
+                _r3.metric(
+                    "Mean EKE in frame (relative)",
+                    f"{float(_atlas_regimes['eke'][_t, _atlas_ocean].mean()):.2e}",
+                    help="Eddy kinetic energy proxy from SSH gradients",
+                )
+    except Exception as _atlas_err:
+        st.caption(f"Atlas skipped: {_atlas_err}")
+
+
 # ---------- Predictions vs targets ----------
 st.header("Predictions vs targets")
 
