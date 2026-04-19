@@ -1,157 +1,170 @@
-import pandas as pd
+"""
+train.py
+========
+
+Train a single SSH forecasting model.
+
+Key choices:
+- Loss is masked so land pixels don't contribute (prediction on land is meaningless)
+- Uses MPS (Apple Silicon) if available, else CUDA, else CPU
+- Saves best-val checkpoint and training history
+
+Usage:
+    from train import train_one
+    history = train_one(config, model_id="m0")
+"""
+
+import os
+import json
+import time
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-import xgboost as xgb
-from tensorflow import keras
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
-HORIZON = 30
-WINDOW = 60
-LAG_DAYS = [7, 14, 30]
-
-# ── Load & filter 1993-1995 ───────────────────────────────────────────────────
-df = pd.read_csv("gulf_mexico_1993_1997.csv")
-df["date"] = pd.to_datetime("1950-01-01") + pd.to_timedelta(df["time"], unit="D")
-df = df[df["date"].dt.year <= 1995].reset_index(drop=True)
-
-# Seasonality encoding
-df["doy_sin"] = np.sin(2 * np.pi * df["date"].dt.dayofyear / 365)
-df["doy_cos"] = np.cos(2 * np.pi * df["date"].dt.dayofyear / 365)
-
-# ── Lag features (for XGBoost) ────────────────────────────────────────────────
-for lag in LAG_DAYS:
-    df[f"adt_lag_{lag}"] = df["adt"].shift(lag)
-    df[f"ice_lag_{lag}"] = df["ice_extent"].shift(lag)
-
-df["target"] = df["adt"].shift(-HORIZON)
-df = df.dropna().reset_index(drop=True)
-
-# ── Train/test split: 1993-1994 train, 1995 test ─────────────────────────────
-train = df[df["date"].dt.year <= 1994].reset_index(drop=True)
-test  = df[df["date"].dt.year == 1995].reset_index(drop=True)
-
-XGB_FEATURES = (
-    [f"adt_lag_{l}" for l in LAG_DAYS] +
-    [f"ice_lag_{l}" for l in LAG_DAYS] +
-    ["doy_sin", "doy_cos"]
-)
-
-X_train_xgb, y_train = train[XGB_FEATURES].values, train["target"].values
-X_test_xgb,  y_test  = test[XGB_FEATURES].values,  test["target"].values
-
-# ── XGBoost ──────────────────────────────────────────────────────────────────
-xgb_model = xgb.XGBRegressor(n_estimators=300, max_depth=4, learning_rate=0.05,
-                               subsample=0.8, random_state=42)
-xgb_model.fit(X_train_xgb, y_train, eval_set=[(X_test_xgb, y_test)], verbose=False)
-xgb_preds = xgb_model.predict(X_test_xgb)
-
-xgb_mae  = mean_absolute_error(y_test, xgb_preds)
-xgb_rmse = np.sqrt(mean_squared_error(y_test, xgb_preds))
-print(f"XGBoost  — MAE: {xgb_mae:.4f}  RMSE: {xgb_rmse:.4f}")
-
-# ── LSTM data prep ────────────────────────────────────────────────────────────
-LSTM_FEATURES = ["adt", "ice_extent", "doy_sin", "doy_cos"]
-
-scaler_X = MinMaxScaler()
-scaler_y = MinMaxScaler()
-
-all_X = df[LSTM_FEATURES].values
-all_y = df["target"].values.reshape(-1, 1)
-
-train_idx = df[df["date"].dt.year <= 1994].index
-test_idx  = df[df["date"].dt.year == 1995].index
-
-scaler_X.fit(all_X[train_idx])
-scaler_y.fit(all_y[train_idx])
-
-scaled_X = scaler_X.transform(all_X)
-scaled_y = scaler_y.transform(all_y).flatten()
-
-def make_sequences(X, y, indices, window):
-    seqs, targets = [], []
-    for i in indices:
-        if i < window:
-            continue
-        seqs.append(X[i - window:i])
-        targets.append(y[i])
-    return np.array(seqs), np.array(targets)
-
-X_train_lstm, y_train_lstm = make_sequences(scaled_X, scaled_y, train_idx, WINDOW)
-X_test_lstm,  y_test_lstm  = make_sequences(scaled_X, scaled_y, test_idx,  WINDOW)
-
-# ── LSTM model ────────────────────────────────────────────────────────────────
-model = keras.Sequential([
-    keras.layers.LSTM(64, input_shape=(WINDOW, len(LSTM_FEATURES)), return_sequences=True),
-    keras.layers.Dropout(0.2),
-    keras.layers.LSTM(32),
-    keras.layers.Dropout(0.2),
-    keras.layers.Dense(1),
-])
-model.compile(optimizer="adam", loss="mse")
-
-early_stop = keras.callbacks.EarlyStopping(patience=15, restore_best_weights=True)
-model.fit(X_train_lstm, y_train_lstm, epochs=200, batch_size=32,
-          validation_split=0.1, callbacks=[early_stop], verbose=0)
-
-lstm_preds_scaled = model.predict(X_test_lstm).flatten()
-lstm_preds = scaler_y.inverse_transform(lstm_preds_scaled.reshape(-1, 1)).flatten()
-y_test_lstm_orig = scaler_y.inverse_transform(y_test_lstm.reshape(-1, 1)).flatten()
-
-lstm_mae  = mean_absolute_error(y_test_lstm_orig, lstm_preds)
-lstm_rmse = np.sqrt(mean_squared_error(y_test_lstm_orig, lstm_preds))
-print(f"LSTM     — MAE: {lstm_mae:.4f}  RMSE: {lstm_rmse:.4f}")
+from dataset import make_loaders
+from models import build_model, count_params
 
 
+CHECKPOINT_DIR = "checkpoints"
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 
-# --- auto-injected predictions.csv writer (contract shim) ---
-try:
-    import pandas as _pd
-    import numpy as _np
-    from pathlib import Path as _Path
-    _g = globals()
+def get_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
 
-    def _is_1d_num_array(v):
-        try:
-            a = _np.asarray(v)
-            return a.ndim == 1 and a.size > 0 and _np.issubdtype(a.dtype, _np.number)
-        except Exception:
-            return False
 
-    _arrays = {k: _np.asarray(v) for k, v in list(_g.items())
-               if not k.startswith('_') and _is_1d_num_array(v)}
-    _target_keys = [k for k in _arrays if any(s in k.lower() for s in ('y_test', 'target', 'y_true', 'y_val'))]
-    _pred_keys = [k for k in _arrays if 'pred' in k.lower() and 'lag' not in k.lower()]
+def masked_mse(pred, target, mask):
+    """
+    MSE loss that ignores land pixels.
+    pred, target: (B, 1, H, W)
+    mask: (H, W) bool, True = land (ignore), False = ocean (keep)
+    """
+    ocean = ~mask  # True where we care
+    ocean = ocean.to(pred.device).unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+    sq_err = (pred - target) ** 2
+    # Mean over ocean pixels only
+    return (sq_err * ocean).sum() / ocean.sum() / pred.shape[0]
 
-    _t_arr, _p_arr, _picked_t, _picked_p = None, None, None, None
-    for _tk in _target_keys:
-        for _pk in _pred_keys:
-            if len(_arrays[_tk]) == len(_arrays[_pk]):
-                _t_arr, _p_arr, _picked_t, _picked_p = _arrays[_tk], _arrays[_pk], _tk, _pk
-                break
-        if _t_arr is not None:
-            break
 
-    if _t_arr is not None:
-        _out = _pd.DataFrame({'target': _t_arr, 'prediction': _p_arr})
-        # Pull matching feature/context columns from a test DataFrame if present
-        for _candidate_name in ('test', 'test_df', 'df_test', 'X_test_df', 'val', 'val_df'):
-            _cand = _g.get(_candidate_name)
-            if isinstance(_cand, _pd.DataFrame) and len(_cand) == len(_t_arr):
-                for _c in _cand.columns:
-                    if _c in _out.columns:
-                        continue
-                    try:
-                        _col_arr = _cand[_c].to_numpy()
-                        if _np.issubdtype(_col_arr.dtype, _np.number):
-                            _out[_c] = _col_arr
-                    except Exception:
-                        pass
-                break
-        _out.to_csv(_Path(__file__).parent / 'predictions.csv', index=False)
-        print(f"auto-injected: wrote predictions.csv ({len(_out)} rows, cols: {list(_out.columns)}) from {_picked_t}/{_picked_p}")
-    else:
-        print(f"auto-inject skipped: no matching target/prediction arrays (targets={_target_keys}, preds={_pred_keys})")
-except Exception as _e:
-    print(f"auto-inject skipped: {_e}")
+def train_one(config, model_id="m0", verbose=True):
+    """
+    Train one model. Returns dict with best_val_loss and history.
+
+    config keys:
+        base_width: int
+        depth: int
+        lr: float
+        epochs: int
+        batch_size: int
+        seed: int
+    """
+    torch.manual_seed(config.get("seed", 0))
+    np.random.seed(config.get("seed", 0))
+
+    device = get_device()
+    if verbose:
+        print(f"[{model_id}] Device: {device}")
+
+    # Data
+    train_loader, val_loader, _, meta = make_loaders(
+        batch_size=config.get("batch_size", 16),
+    )
+    land_mask = torch.from_numpy(meta["land_mask"])  # (H, W) bool
+
+    # Model
+    model = build_model(config).to(device)
+    n_params = count_params(model)
+    if verbose:
+        print(f"[{model_id}] Model: base_width={config['base_width']}, "
+              f"depth={config['depth']}, params={n_params:,}")
+
+    # Optim
+    optimizer = AdamW(model.parameters(), lr=config.get("lr", 3e-4), weight_decay=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=config.get("epochs", 8))
+
+    best_val = float("inf")
+    history = {"train_loss": [], "val_loss": [], "epoch_time": []}
+    ckpt_path = os.path.join(CHECKPOINT_DIR, f"{model_id}.pt")
+
+    for epoch in range(config.get("epochs", 8)):
+        t0 = time.time()
+
+        # --- Train ---
+        model.train()
+        train_losses = []
+        for x, y in train_loader:
+            x = x.to(device)
+            y = y.to(device)
+            pred = model(x)
+            loss = masked_mse(pred, y, land_mask)
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            train_losses.append(loss.item())
+        scheduler.step()
+
+        # --- Val ---
+        model.eval()
+        val_losses = []
+        with torch.no_grad():
+            for x, y in val_loader:
+                x = x.to(device)
+                y = y.to(device)
+                pred = model(x)
+                loss = masked_mse(pred, y, land_mask)
+                val_losses.append(loss.item())
+
+        tr = float(np.mean(train_losses))
+        vl = float(np.mean(val_losses))
+        dt = time.time() - t0
+        history["train_loss"].append(tr)
+        history["val_loss"].append(vl)
+        history["epoch_time"].append(dt)
+
+        if verbose:
+            print(f"[{model_id}] epoch {epoch+1}/{config['epochs']} "
+                  f"train={tr:.4f} val={vl:.4f} ({dt:.1f}s)")
+
+        if vl < best_val:
+            best_val = vl
+            torch.save({
+                "state_dict": model.state_dict(),
+                "config": config,
+                "meta": {k: v for k, v in meta.items() if not isinstance(v, np.ndarray)},
+                "epoch": epoch,
+                "val_loss": vl,
+            }, ckpt_path)
+
+    # Save history
+    hist_path = os.path.join(CHECKPOINT_DIR, f"{model_id}_history.json")
+    with open(hist_path, "w") as f:
+        json.dump({
+            "config": config,
+            "best_val": best_val,
+            "n_params": n_params,
+            "history": history,
+        }, f, indent=2)
+
+    if verbose:
+        print(f"[{model_id}] Best val loss: {best_val:.4f}, saved to {ckpt_path}")
+    return {"best_val": best_val, "history": history, "ckpt_path": ckpt_path}
+
+
+if __name__ == "__main__":
+    # Single-model smoke test
+    config = {
+        "base_width": 32,
+        "depth": 3,
+        "lr": 3e-4,
+        "epochs": 3,
+        "batch_size": 16,
+        "seed": 0,
+    }
+    train_one(config, model_id="smoke_test")

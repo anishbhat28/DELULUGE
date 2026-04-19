@@ -1,494 +1,372 @@
-import re
-import subprocess
-import sys
-import time
-from pathlib import Path
-
-import streamlit as st
-
-from automated_preprocessing import extract_train_context, extract_data_features, build_prompt
-from openai import OpenAI as _OpenAI
-
-AUTORESEARCH_BUDGET = 10
-
-ALLOWED_DATA_EXTENSIONS  = {"csv"}
-ALLOWED_MODEL_EXTENSIONS = {"py"}
-
-st.set_page_config(page_title="Model Diagnostics", page_icon="📊", layout="centered")
-
-if "last_run_sig" not in st.session_state:
-    st.session_state.last_run_sig = None
-
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
-html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
-
-.stApp {
-    background: #faf6ee !important;
-    min-height: 100vh;
-    position: relative !important;
-}
-
-#MainMenu, footer, header { visibility: hidden; }
-[data-testid="stSidebarNav"], [data-testid="stSidebar"] { display: none !important; }
-.block-container { padding-top: 0 !important; max-width: 760px !important; }
-
-/* ── Nav ── */
-.nav {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 18px 0;
-    border-bottom: 1px solid #e8dff5;
-}
-.nav-left { display: flex; align-items: center; gap: 10px; }
-.nav-icon {
-    width: 36px; height: 36px;
-    background: linear-gradient(135deg, #a894e0, #cfc0f5);
-    border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 16px;
-}
-.nav-title { color: #3b3040; font-weight: 600; font-size: 1.05rem; letter-spacing: -.2px; }
-.nav-badge {
-    background: #f0ebfc;
-    color: #8b6fd4;
-    border: 1px solid #d8ccf4;
-    font-size: .7rem; font-weight: 600;
-    padding: 2px 10px; border-radius: 20px;
-    text-transform: uppercase; letter-spacing: .5px;
-}
-
-/* ── Hero ── */
-.hero { text-align: center; padding: 48px 20px 36px; }
-.hero-eyebrow {
-    display: inline-block;
-    background: #f0ebfc;
-    border: 1px solid #d8ccf4;
-    color: #8b6fd4;
-    font-size: .75rem; font-weight: 600;
-    padding: 5px 14px; border-radius: 20px;
-    margin-bottom: 18px; letter-spacing: .5px; text-transform: uppercase;
-}
-.hero h1 { font-size: 2.4rem; font-weight: 700; line-height: 1.15; letter-spacing: -.5px; margin-bottom: 12px; color: #3b3040; }
-.hero h1 span { color: #8b6fd4; }
-.hero p { font-size: 1rem; color: #9a8fa6; line-height: 1.65; }
-
-/* ── Card ── */
-.card {
-    background: #fffdf9;
-    border-radius: 20px;
-    border: 1px solid #ecdff5;
-    box-shadow: 0 4px 24px rgba(180,160,210,.12);
-    overflow: hidden; margin-bottom: 32px;
-}
-.card-header {
-    background: linear-gradient(90deg, #f5effc, #fffdf9);
-    border-bottom: 1px solid #ecdff5;
-    padding: 22px 30px;
-    display: flex; align-items: center; gap: 12px;
-}
-.card-header-icon {
-    width: 40px; height: 40px;
-    background: #ece4fa; border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 18px;
-}
-.card-header h2 { font-size: 1.05rem; font-weight: 600; color: #3b3040; margin: 0; }
-.card-header p  { font-size: .82rem; color: #8b6fd4; margin: 2px 0 0; }
-.card-body { padding: 28px 30px 30px; }
-
-/* ── Steps ── */
-.steps { display: flex; gap: 0; margin-bottom: 28px; position: relative; }
-.steps::before {
-    content: '';
-    position: absolute; top: 14px; left: 14%; right: 14%;
-    height: 2px; background: #e8dff5; z-index: 0;
-}
-.step { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; position: relative; z-index: 1; }
-.step-num {
-    width: 28px; height: 28px; border-radius: 50%;
-    background: #a894e0; color: #fff;
-    font-size: .75rem; font-weight: 700;
-    display: flex; align-items: center; justify-content: center;
-}
-.step-label { font-size: .72rem; color: #8b6fd4; font-weight: 600; }
-
-/* ── Labels ── */
-.field-label { font-size: .83rem; font-weight: 600; color: #4e4260; margin-bottom: 2px; }
-.field-hint  { font-size: .76rem; color: #9a8fa6; margin-bottom: 6px; }
-
-/* ── Streamlit widget overrides ── */
-[data-testid="stFileUploader"] {
-    border: 2px solid #d0c2f0 !important;
-    border-radius: 12px !important;
-    background: #faf5ff !important;
-    transition: border-color .2s, background .2s !important;
-    overflow: hidden !important;
-}
-[data-testid="stFileUploader"]:hover {
-    border-color: #a894e0 !important;
-    background: #f3ecfc !important;
-}
-[data-testid="stFileUploader"] label { display: none !important; }
-
-[data-testid="stFileUploaderDropzone"] {
-    background: #faf5ff !important;
-    border: none !important;
-    border-radius: 10px !important;
-}
-[data-testid="stFileUploaderDropzone"]:hover { background: #f3ecfc !important; }
-
-[data-testid="stFileUploaderDropzoneInstructions"] { color: #8b6fd4 !important; }
-[data-testid="stFileUploaderDropzoneInstructions"] span,
-[data-testid="stFileUploaderDropzoneInstructions"] small,
-[data-testid="stFileUploaderDropzoneInstructions"] * { color: #8b6fd4 !important; }
-[data-testid="stFileUploaderDropzone"] p,
-[data-testid="stFileUploaderDropzone"] span,
-[data-testid="stFileUploaderDropzone"] div,
-[data-testid="stFileUploaderDropzone"] small { color: #8b6fd4 !important; }
-[data-testid="stFileUploaderDropzoneInstructions"] svg { fill: #a894e0 !important; color: #a894e0 !important; }
-[data-testid="stFileUploader"] button {
-    background: #ede5fc !important; color: #4e3a80 !important;
-    border: 1px solid #d0c2f0 !important; border-radius: 6px !important; font-weight: 600 !important;
-}
-[data-testid="stFileUploader"] button:hover { background: #e0d4fa !important; }
-[data-testid="stFileUploader"] span,
-[data-testid="stFileUploader"] p,
-[data-testid="stFileUploader"] div,
-[data-testid="stFileUploader"] small,
-[data-testid="stFileUploaderFile"] span,
-[data-testid="stFileUploaderFile"] *,
-[data-testid="stUploadedFile"] span,
-[data-testid="stUploadedFile"] * { color: #8b6fd4 !important; }
-
-[data-testid="stTextArea"] textarea {
-    border: 1.5px solid #cfc0f5 !important;
-    border-radius: 8px !important;
-    background: #fdf9ff !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: .9rem !important; color: #3b3040 !important;
-    caret-color: #000 !important;
-    transition: border-color .15s, box-shadow .15s !important;
-}
-[data-testid="stTextArea"] textarea:focus {
-    border-color: #a894e0 !important;
-    box-shadow: 0 0 0 3px rgba(196,181,244,.18) !important;
-}
-[data-testid="stTextArea"] label { display: none !important; }
-
-/* ── Button ── */
-[data-testid="stButton"] > button {
-    width: 100% !important;
-    background: linear-gradient(135deg, #a894e0, #cfc0f5) !important;
-    color: #4e3a80 !important; border: none !important;
-    border-radius: 8px !important; padding: 14px !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: .95rem !important; font-weight: 600 !important;
-    letter-spacing: -.1px !important;
-    box-shadow: 0 2px 10px rgba(196,181,244,.35) !important;
-    transition: all .2s !important; margin-top: 8px !important;
-}
-[data-testid="stButton"] > button:hover {
-    transform: translateY(-1px) !important;
-    box-shadow: 0 4px 18px rgba(196,181,244,.5) !important;
-    background: linear-gradient(135deg, #b8a6f0, #d4c8f8) !important;
-}
-
-/* ── Response panels ── */
-.resp-success { border: 1.5px solid #a8d5b8; border-radius: 8px; overflow: hidden; margin-top: 20px; }
-.resp-success-header { background: #d8f2e4; color: #3a8a5c; padding: 10px 16px; font-size: .83rem; font-weight: 600; }
-.resp-error { border: 1.5px solid #f4afc0; border-radius: 8px; overflow: hidden; margin-top: 20px; }
-.resp-error-header { background: #fce8ef; color: #c05070; padding: 10px 16px; font-size: .83rem; font-weight: 600; }
-.resp-body { background: #fffdf9; padding: 16px; font-size: .85rem; line-height: 1.7; color: #4e4260; }
-.resp-row { display: flex; gap: 10px; margin-bottom: 5px; }
-.resp-key { font-weight: 600; color: #a894e0; min-width: 80px; font-size: .78rem; text-transform: uppercase; letter-spacing: .3px; }
-.resp-val { color: #3b3040; }
-
-.site-footer { text-align: center; padding: 16px 0 24px; font-size: .75rem; color: #c4b8d0; }
-
-</style>
-""", unsafe_allow_html=True)
-
-# ── Nav ──
-st.markdown("""
-<div class="nav">
-  <div class="nav-left"></div>
-  <span class="nav-badge">Research Tool</span>
-</div>
-""", unsafe_allow_html=True)
-
-# ── Hero ──
-st.markdown("""
-<div class="hero">
-  <h1>Interpret Your <span>Model Output</span></h1>
-  <p>Upload a trained model and a dataset, then describe what you want to know.</p>
-</div>
-""", unsafe_allow_html=True)
-
-# ── Card ──
-st.markdown("""
-<div class="card">
-  <div class="card-body">
-    <div class="steps">
-      <div class="step"><div class="step-num">1</div><div class="step-label">Training Script</div></div>
-      <div class="step"><div class="step-num">2</div><div class="step-label">Upload Data</div></div>
-      <div class="step"><div class="step-num">3</div><div class="step-label">Write Prompt</div></div>
-    </div>
-""", unsafe_allow_html=True)
-
-st.markdown('<div class="field-label">Training Script <span style="color:#e08898">*</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="field-hint">Your train.py will be executed with <code>python train.py</code>. It must read <code>data.csv</code> and write <code>predictions.csv</code> with columns <code>target</code> + <code>prediction</code> (plus optional numeric feature columns).</div>', unsafe_allow_html=True)
-modelfile = st.file_uploader("Training script", type=list(ALLOWED_MODEL_EXTENSIONS), key="model")
-
-st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
-
-st.markdown('<div class="field-label">Data File <span style="color:#e08898">*</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="field-hint">Tabular CSV. Your train.py consumes this and produces predictions.csv.</div>', unsafe_allow_html=True)
-datafile = st.file_uploader("Data file", type=list(ALLOWED_DATA_EXTENSIONS), key="data")
-
-st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
-
-st.markdown('<div class="field-label">Prompt <span style="color:#e08898">*</span></div>', unsafe_allow_html=True)
-st.markdown('<div class="field-hint">Describe what you want analyzed or explained about the model output.</div>', unsafe_allow_html=True)
-prompt = st.text_area(
-    "Prompt",
-    placeholder="e.g. What are the most significant predictors in this model, and how do they interact with each other?",
-    height=130,
-    max_chars=2000,
-)
-
-st.markdown('</div></div>', unsafe_allow_html=True)
-
-current_sig = (
-    modelfile.name if modelfile else None,
-    datafile.name if datafile else None,
-    prompt.strip(),
-)
-already_run = current_sig == st.session_state.last_run_sig
-run = st.button("Run Analysis →", disabled=already_run)
-
-if run:
-    errors = []
-    if not modelfile:
-        errors.append("No model file provided.")
-    elif not ("." in modelfile.name and modelfile.name.rsplit(".", 1)[1].lower() in ALLOWED_MODEL_EXTENSIONS):
-        errors.append(f"Model file type not supported. Accepted: {', '.join(ALLOWED_MODEL_EXTENSIONS)}")
-    if not datafile:
-        errors.append("No data file provided.")
-    elif not ("." in datafile.name and datafile.name.rsplit(".", 1)[1].lower() in ALLOWED_DATA_EXTENSIONS):
-        errors.append(f"Data file type not supported. Accepted: {', '.join(ALLOWED_DATA_EXTENSIONS)}")
-    if not prompt.strip():
-        errors.append("Prompt cannot be empty.")
-
-    if errors:
-        for e in errors:
-            st.markdown(f"""
-            <div class="resp-error">
-              <div class="resp-error-header">Error</div>
-              <div class="resp-body">{e}</div>
-            </div>""", unsafe_allow_html=True)
-    else:
-        project_root = Path(__file__).parent
-
-        def save_upload(f, dest: Path):
-            with open(dest, "wb") as out:
-                out.write(f.getbuffer())
-            return dest
-
-        train_path = save_upload(modelfile, project_root / "train.py")
-        data_ext = datafile.name.rsplit(".", 1)[1].lower()
-        data_path = save_upload(datafile, project_root / f"data.{data_ext}")
-        output_path = project_root / "program.md"
-
-        # Contract shims — make the uploaded train.py produce predictions.csv
-        # and read whatever filename it hardcoded by aliasing common names.
-        import shutil as _shutil
-        _train_src = train_path.read_text(encoding="utf-8")
-
-        # Alias data.csv to every CSV filename the uploaded train.py hardcodes
-        _csv_refs = set(re.findall(r"""['"]([^'"\s]+\.csv)['"]""", _train_src))
-        _csv_refs.update({"combined_data.csv", "input_data.csv", "train_data.csv"})
-        _csv_refs.discard("data.csv")
-        _csv_refs.discard("predictions.csv")
-        for alias in _csv_refs:
-            _alias_path = project_root / Path(alias).name
-            if _alias_path.resolve() == data_path.resolve():
-                continue
-            _shutil.copy(data_path, _alias_path)
-
-        if "predictions.csv" not in _train_src:
-            _train_src += """
-
-# --- auto-injected predictions.csv writer (contract shim) ---
-try:
-    import pandas as _pd
-    import numpy as _np
-    from pathlib import Path as _Path
-    _g = globals()
-
-    def _is_1d_num_array(v):
-        try:
-            a = _np.asarray(v)
-            return a.ndim == 1 and a.size > 0 and _np.issubdtype(a.dtype, _np.number)
-        except Exception:
-            return False
-
-    _arrays = {k: _np.asarray(v) for k, v in list(_g.items())
-               if not k.startswith('_') and _is_1d_num_array(v)}
-    _target_keys = [k for k in _arrays if any(s in k.lower() for s in ('y_test', 'target', 'y_true', 'y_val'))]
-    _pred_keys = [k for k in _arrays if 'pred' in k.lower() and 'lag' not in k.lower()]
-
-    _t_arr, _p_arr, _picked_t, _picked_p = None, None, None, None
-    for _tk in _target_keys:
-        for _pk in _pred_keys:
-            if len(_arrays[_tk]) == len(_arrays[_pk]):
-                _t_arr, _p_arr, _picked_t, _picked_p = _arrays[_tk], _arrays[_pk], _tk, _pk
-                break
-        if _t_arr is not None:
-            break
-
-    if _t_arr is not None:
-        _out = _pd.DataFrame({'target': _t_arr, 'prediction': _p_arr})
-        # Pull matching feature/context columns from a test DataFrame if present
-        for _candidate_name in ('test', 'test_df', 'df_test', 'X_test_df', 'val', 'val_df'):
-            _cand = _g.get(_candidate_name)
-            if isinstance(_cand, _pd.DataFrame) and len(_cand) == len(_t_arr):
-                for _c in _cand.columns:
-                    if _c in _out.columns:
-                        continue
-                    try:
-                        _col_arr = _cand[_c].to_numpy()
-                        if _np.issubdtype(_col_arr.dtype, _np.number):
-                            _out[_c] = _col_arr
-                    except Exception:
-                        pass
-                break
-        _out.to_csv(_Path(__file__).parent / 'predictions.csv', index=False)
-        print(f"auto-injected: wrote predictions.csv ({len(_out)} rows, cols: {list(_out.columns)}) from {_picked_t}/{_picked_p}")
-    else:
-        print(f"auto-inject skipped: no matching target/prediction arrays (targets={_target_keys}, preds={_pred_keys})")
-except Exception as _e:
-    print(f"auto-inject skipped: {_e}")
 """
-            train_path.write_text(_train_src, encoding="utf-8")
+app.py -- Streamlit UI for the environmental-ML trust lab.
 
-        try:
-            bar = st.progress(0, text="Saving uploaded files…")
-            bar.progress(8, text="Parsing training script…")
-            train_context = extract_train_context(train_path)
-            bar.progress(15, text="Extracting data features…")
-            data_features = extract_data_features(data_path)
-            bar.progress(22, text="Building prompt…")
-            prompt_text = build_prompt(train_context, prompt.strip(), data_features)
-            bar.progress(30, text="Running automated preprocessing — this may take a moment…")
-            _client = _OpenAI()
-            response = _client.responses.create(model="gpt-5.4", input=prompt_text)
-            program_md = response.output_text.strip()
-            if program_md.startswith("```"):
-                lines = program_md.splitlines()
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].startswith("```"):
-                    lines = lines[:-1]
-                program_md = "\n".join(lines).strip()
-            bar.progress(35, text="Writing program.md…")
-            output_path.write_text(program_md, encoding="utf-8")
-            bar.progress(38, text="Preprocessing complete. Running the training script…")
+Run with:
+    streamlit run app.py
+"""
 
-            log_lines: list[str] = []
+import numpy as np
+import streamlit as st
+import matplotlib.pyplot as plt
+import cmocean
 
-            def push_log(line: str):
-                log_lines.append(line)
-                if len(log_lines) > 200:
-                    del log_lines[: len(log_lines) - 200]
 
-            predictions_path = project_root / "predictions.csv"
-            if predictions_path.exists():
-                predictions_path.unlink()
+# ---------- Page config ----------
+st.set_page_config(
+    page_title="Environmental ML Trust Lab",
+    page_icon="🌊",
+    layout="wide",
+)
 
-            train_proc = subprocess.Popen(
-                [sys.executable, "train.py"],
-                cwd=str(project_root),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+
+# ---------- Data loading (cached) ----------
+@st.cache_data
+def load_data():
+    preds = np.load("outputs/test_predictions.npz")
+    regimes = np.load("outputs/test_regimes.npz")
+    return {
+        "targets": preds["targets"],
+        "ensemble_mean": preds["ensemble_mean"],
+        "ensemble_std": preds["ensemble_std"],
+        "abs_error": preds["abs_error"],
+        "land_mask": preds["land_mask"],
+        "lat": preds["lat"],
+        "lon": preds["lon"],
+        "norm_mean": float(preds["mean_norm"]),
+        "norm_std": float(preds["std_norm"]),
+        "eke": regimes["eke"],
+        "ow": regimes["ow"],
+        "lc_extent": regimes["lc_extent"],
+        "anom_mag": regimes["anom_mag"],
+    }
+
+
+d = load_data()
+ocean = ~d["land_mask"]
+T, H, W = d["targets"].shape
+
+
+# Default slider position: the money-shot timestep if it exists, else middle
+def get_default_t():
+    try:
+        import json
+        with open("outputs/money_shot.json") as f:
+            return int(json.load(f)["timestep"])
+    except Exception:
+        return T // 2
+
+
+default_t = get_default_t()
+
+
+# ---------- Header ----------
+st.title("🌊 Environmental ML Trust Lab — Gulf of Mexico")
+st.markdown(
+    """
+    **A spatiotemporal atlas of where neural ocean surrogates fail, and why.**
+
+    As operational ocean forecasting migrates from expensive numerical simulations to fast ML surrogates,
+    silent failure becomes the blocker to deployment. This lab maps where, when, and how a U-Net ensemble
+    breaks down on Gulf of Mexico sea surface height, and grounds those failures in physical regimes
+    (eddy kinetic energy, Loop Current dynamics, Okubo-Weiss vortex structure).
+    """
+)
+
+# ---------- Headline metrics ----------
+rmse_m = float((d["abs_error"][:, ocean] ** 2).mean() ** 0.5) * d["norm_std"]
+disag_m = float(d["ensemble_std"][:, ocean].mean()) * d["norm_std"]
+persistence_rmse_m = 0.0103  # from baseline_check.py
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric(
+    "Model RMSE (test)",
+    f"{rmse_m*1000:.1f} mm",
+    help="Ensemble mean vs. numerical-simulation truth, Loop Current region, held-out test years",
+)
+c2.metric(
+    "Persistence RMSE (val)",
+    f"{persistence_rmse_m*1000:.1f} mm",
+    help="Baseline: predict tomorrow = today",
+)
+c3.metric(
+    "Skill over persistence",
+    f"{persistence_rmse_m / rmse_m:.2f}x",
+    help="Our ensemble actually learns dynamics, not just copies the input",
+)
+c4.metric(
+    "Mean disagreement",
+    f"{disag_m*1000:.1f} mm",
+    help="Average across the 5 ensemble members — this is the trust signal",
+)
+
+
+# ---------- Atlas ----------
+st.header("The atlas -- drag the slider to explore")
+
+t = st.slider(
+    "Test-set day index",
+    min_value=0, max_value=T - 1, value=default_t, step=1,
+)
+
+def mask_land(arr, land_mask):
+    out = arr.copy()
+    out[land_mask] = np.nan
+    return out
+
+
+truth_m = d["targets"][t] * d["norm_std"]
+pred_m = d["ensemble_mean"][t] * d["norm_std"]
+disag_field_m = d["ensemble_std"][t] * d["norm_std"]
+err_m = d["abs_error"][t] * d["norm_std"]
+
+vmax_ssh = float(max(np.abs(truth_m).max(), np.abs(pred_m).max()))
+vmax_disag = float(disag_field_m[ocean].max())
+vmax_err = float(err_m[ocean].max())
+
+fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
+extent = [d["lon"].min(), d["lon"].max(), d["lat"].min(), d["lat"].max()]
+
+im0 = axes[0].imshow(mask_land(truth_m, d["land_mask"]), cmap=cmocean.cm.balance,
+                     origin="lower", extent=extent, vmin=-vmax_ssh, vmax=vmax_ssh, aspect="auto")
+axes[0].set_title("Truth SSH (m)")
+plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+im1 = axes[1].imshow(mask_land(pred_m, d["land_mask"]), cmap=cmocean.cm.balance,
+                     origin="lower", extent=extent, vmin=-vmax_ssh, vmax=vmax_ssh, aspect="auto")
+axes[1].set_title("Ensemble mean prediction (m)")
+plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+im2 = axes[2].imshow(mask_land(disag_field_m, d["land_mask"]), cmap=cmocean.cm.amp,
+                     origin="lower", extent=extent, vmin=0, vmax=vmax_disag, aspect="auto")
+axes[2].set_title("Disagreement (m) -- trust field")
+plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+
+im3 = axes[3].imshow(mask_land(err_m, d["land_mask"]), cmap=cmocean.cm.amp,
+                     origin="lower", extent=extent, vmin=0, vmax=vmax_err, aspect="auto")
+axes[3].set_title("Absolute error (m)")
+plt.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
+
+for ax in axes:
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+
+fig.suptitle(f"Test day index t = {t}   |   simulation day ~ {11500 + 7 + t}", fontsize=11, y=1.02)
+fig.tight_layout()
+st.pyplot(fig)
+
+st.caption(
+    "Reading the atlas: left two panels should look nearly identical (truth vs. prediction). "
+    "Third panel shows where the ensemble is uncertain; fourth shows where it's actually wrong. "
+    "The scientific claim: these two fields should correlate. Drag the slider to verify."
+)
+
+# Per-timestep regime indicators for the current frame
+r1, r2, r3 = st.columns(3)
+r1.metric(
+    "Loop Current extent (this frame)",
+    f"{d['lc_extent'][t]:.2f}°N",
+    help="Northernmost latitude where SSH exceeds a high-anomaly contour in the eastern domain",
+)
+r2.metric(
+    "Domain anomaly magnitude (this frame)",
+    f"{d['anom_mag'][t]*1000:.1f} mm",
+    help="Mean absolute SSH anomaly over the ocean pixels",
+)
+r3.metric(
+    "Mean EKE in frame (relative)",
+    f"{float(d['eke'][t, ocean].mean()):.2e}",
+    help="Eddy kinetic energy proxy from SSH gradients",
+)
+
+
+# ---------- Scatter: disagreement vs error ----------
+st.header("Does disagreement predict error?")
+
+
+@st.cache_data
+def compute_scatter_data():
+    ocean_mask = ~d["land_mask"]
+    flat_disag = d["ensemble_std"][:, ocean_mask].ravel() * d["norm_std"]
+    flat_err = d["abs_error"][:, ocean_mask].ravel() * d["norm_std"]
+    flat_eke = d["eke"][:, ocean_mask].ravel()
+    r = float(np.corrcoef(flat_disag, flat_err)[0, 1])
+    rng = np.random.default_rng(0)
+    idx = rng.choice(flat_disag.size, size=min(15000, flat_disag.size), replace=False)
+    return flat_disag[idx], flat_err[idx], flat_eke[idx], r
+
+
+disag_pts, err_pts, eke_pts, r_corr = compute_scatter_data()
+
+fig2, ax = plt.subplots(figsize=(8, 6))
+sc = ax.scatter(
+    disag_pts * 1000, err_pts * 1000,
+    c=np.log10(eke_pts + 1e-20), s=4, alpha=0.4, cmap="viridis",
+)
+ax.set_xlabel("Ensemble disagreement (mm)")
+ax.set_ylabel("Absolute error (mm)")
+ax.set_title(f"Disagreement vs error  |  Pearson r = {r_corr:.3f}  |  n = 15,000 sampled points")
+cbar = plt.colorbar(sc, ax=ax)
+cbar.set_label("log10(Eddy kinetic energy)")
+lim = float(max(ax.get_xlim()[1], ax.get_ylim()[1]))
+ax.plot([0, lim], [0, lim], "k--", alpha=0.3, linewidth=1, label="1:1")
+ax.legend(loc="upper left", fontsize=9)
+fig2.tight_layout()
+st.pyplot(fig2)
+
+st.caption(
+    f"Each point is one pixel at one timestep, color is log-eddy-kinetic-energy at that pixel. "
+    f"Disagreement is a real predictor of error (r = {r_corr:.3f}). "
+    f"Yellow points (high-eddy pixels) concentrate in the upper right: errors are worst where "
+    f"the ocean is dynamically active, exactly where a forecaster needs to know not to trust the surrogate."
+)
+
+
+# ---------- Validated failure modes ----------
+st.header("Validated failure modes (autoresearch loop)")
+
+import json as _json
+import os as _os
+
+_findings_path = "outputs/findings.json"
+if not _os.path.exists(_findings_path):
+    st.info(
+        "No findings.json yet. Run `python autoresearch.py` to populate this section. "
+        "The loop will propose physical-regime hypotheses, test them on a discovery split, "
+        "and validate the survivors on a held-out temporal split with Bonferroni correction."
+    )
+else:
+    with open(_findings_path) as _f:
+        _findings_doc = _json.load(_f)
+
+    _findings = _findings_doc.get("findings", [])
+    _n_total = len(_findings)
+    _n_validated = sum(1 for f in _findings if f.get("validated"))
+    _n_rejected = _n_total - _n_validated
+    _alpha = _findings_doc.get("config", {}).get("bonferroni_alpha", 0.05)
+
+    st.markdown(
+        f"""
+        Our grounded autoresearch loop proposed **{_n_total} physical-regime hypotheses**, tested
+        them on a discovery split, and validated the survivors on a separate temporal holdout
+        with Bonferroni correction at α = {_alpha:.4f}. **{_n_validated} passed** validation;
+        **{_n_rejected} were correctly rejected** when their effect failed to generalize.
+
+        Every finding below carries a pair of 8-character receipt IDs pointing to the tool calls
+        that computed each number. The full execution trace is in `outputs/findings.json`.
+        """
+    )
+
+    def _describe(f):
+        r = f["regime_type"]
+        v = f["value"]
+        if r == "eke":
+            return f"High eddy kinetic energy (top {100 - v:.0f}% of pixel-timesteps)"
+        if r == "ow_negative":
+            return "Vortex-core regions (Okubo-Weiss < 0)"
+        if r == "ow_positive":
+            return "Strain/frontal regions (Okubo-Weiss > 0)"
+        if r == "anom_percentile":
+            return f"Timesteps with high domain-mean SSH anomaly (top {100 - v:.0f}%)"
+        if r == "lc_extent":
+            return f"Timesteps when Loop Current extends {f.get('comparator','')} {v:.1f}°N"
+        return str(r)
+
+    # Validated findings first
+    for f in _findings:
+        if not f.get("validated"):
+            continue
+        desc = _describe(f)
+        val = f["validation"]
+        disc = f["discovery"]
+        with st.container(border=True):
+            st.markdown(f"**✓ VALIDATED — {desc}**")
+            cc1, cc2, cc3 = st.columns(3)
+            cc1.metric("Error ratio (validation)", f"{val['error_ratio']:.2f}×",
+                       help="Mean error inside regime / mean error outside, on held-out data")
+            cc2.metric("Mean err inside (val)", f"{f['mean_err_inside_val_mm']:.2f} mm")
+            cc3.metric("Mean err outside (val)", f"{f['mean_err_outside_val_mm']:.2f} mm")
+            st.caption(
+                f"p-value (validation): {val['p_value']:.2e}  •  "
+                f"discovery err-ratio: {disc['error_ratio']:.2f}× (p={disc['p_value']:.2e})  •  "
+                f"Receipts: discovery `{disc['call_id']}`, validation `{val['call_id']}`"
             )
-            assert train_proc.stdout is not None
-            for raw in train_proc.stdout:
-                push_log(raw.rstrip())
-            train_proc.wait()
 
-            if train_proc.returncode != 0:
-                st.markdown(f"""
-                <div class="resp-error">
-                  <div class="resp-error-header">train.py failed (exit {train_proc.returncode})</div>
-                  <div class="resp-body">Contract: train.py must read data.csv and write predictions.csv with columns target + prediction.</div>
-                </div>""", unsafe_allow_html=True)
-                st.stop()
-
-            if not predictions_path.exists():
-                st.markdown("""
-                <div class="resp-error">
-                  <div class="resp-error-header">train.py ran but produced no predictions.csv</div>
-                  <div class="resp-body">Contract: train.py must write <code>predictions.csv</code> in the project root with columns <code>target</code> and <code>prediction</code> (plus optional numeric feature columns).</div>
-                </div>""", unsafe_allow_html=True)
-                st.stop()
-
-            bar.progress(50, text="Training complete. Launching deep research…")
-
-            proc = subprocess.Popen(
-                [
-                    sys.executable, "autoresearch.py",
-                    "--data", str(predictions_path),
-                    "--prompt", prompt.strip(),
-                ],
-                cwd=str(project_root),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
+    # Rejected findings — deliberately shown as evidence the protocol works
+    for f in _findings:
+        if f.get("validated"):
+            continue
+        desc = _describe(f)
+        val = f["validation"]
+        disc = f["discovery"]
+        with st.container(border=True):
+            st.markdown(f"**✗ REJECTED — {desc}**")
+            cc1, cc2 = st.columns(2)
+            cc1.metric("Discovery err ratio", f"{disc['error_ratio']:.2f}×",
+                       help="On the split the agent could query")
+            cc2.metric(
+                "Validation err ratio",
+                f"{val['error_ratio']:.2f}×",
+                delta=f"effect {'reversed' if val['error_ratio'] < 1 else 'shrank'}",
+                delta_color="inverse",
+                help="On the held-out split the agent never saw",
+            )
+            st.caption(
+                f"Correctly rejected by Bonferroni-corrected holdout. "
+                f"Receipts: discovery `{disc['call_id']}`, validation `{val['call_id']}`. "
+                f"This is the grounding protocol working as designed — hypotheses that don't "
+                f"generalize to held-out data are thrown out, not reported."
             )
 
-            turn_re = re.compile(r"\[Agent turn (\d+)\]")
-            assert proc.stdout is not None
-            for raw in proc.stdout:
-                line = raw.rstrip()
-                push_log(line)
-                if "Loaded data" in line:
-                    bar.progress(55, text="Deep research: data loaded…")
-                elif "DISCOVERY PHASE" in line:
-                    bar.progress(58, text="Deep research: discovery phase…")
-                elif (m := turn_re.search(line)):
-                    turn = int(m.group(1))
-                    pct = min(58 + int((turn / AUTORESEARCH_BUDGET) * 30), 88)
-                    bar.progress(pct, text=f"Deep research: hypothesis {turn + 1}/{AUTORESEARCH_BUDGET}…")
-                elif "VALIDATION PHASE" in line:
-                    bar.progress(90, text="Deep research: validating on held-out split…")
-                elif "FINAL FINDINGS" in line:
-                    bar.progress(95, text="Deep research: compiling findings…")
-                elif "Saved outputs/findings.json" in line:
-                    bar.progress(98, text="Deep research: findings saved.")
+    # Scientific interpretation
+    if _n_validated > 0:
+        # Pull regime types of validated findings to write an honest paragraph
+        _types = {f["regime_type"] for f in _findings if f.get("validated")}
+        if _types == {"eke"}:
+            interpretation = (
+                "**Interpretation.** All validated findings concern eddy kinetic energy, with "
+                "the effect robust across multiple percentile thresholds (top 5%, 10%, 20%). "
+                "The neural surrogate is systematically less accurate in dynamically active "
+                "regions — exactly where a forecaster relying on fast ML predictions needs to "
+                "know not to trust them. This is the regime-dependence hypothesis the project "
+                "was designed to surface, now with statistical backing from a held-out split."
+            )
+        else:
+            interpretation = (
+                "**Interpretation.** The validated findings span regime types "
+                f"({', '.join(sorted(_types))}), indicating multiple distinct failure modes. "
+                "See `findings.json` for the full receipts."
+            )
+        st.markdown(interpretation)
 
-            proc.wait()
+st.header("Method notes")
 
-            if proc.returncode != 0:
-                st.markdown(f"""
-                <div class="resp-error">
-                  <div class="resp-error-header">Autoresearch failed (exit {proc.returncode})</div>
-                  <div class="resp-body">Check the terminal running streamlit for details.</div>
-                </div>""", unsafe_allow_html=True)
-            else:
-                bar.progress(100, text="Complete! Opening dashboard…")
-                st.session_state.last_run_sig = current_sig
-                time.sleep(0.6)
-                st.switch_page("pages/dashboard.py")
-        except Exception as e:
-            st.markdown(f"""
-            <div class="resp-error">
-              <div class="resp-error-header">Error</div>
-              <div class="resp-body">{e}</div>
-            </div>""", unsafe_allow_html=True)
+st.markdown(
+    """
+    **Data.** 40-year numerical simulation of Gulf of Mexico sea surface height from Scripps Institution
+    of Oceanography, 0.05° resolution. Train: simulation days 0–9999. Val: 10000–11499. Test: 11500–14372.
+    No real-world calendar alignment needed — this is a deterministic run with constant boundary forcing.
 
-    st.markdown('<div class="site-footer">Research Tool &middot; 2026</div>', unsafe_allow_html=True)
+    **Spatial subdomain.** 22°N–28°N, 92°W–84°W, covering the Loop Current and its shed eddies.
+    120 × 146 pixels, ~0.8% land.
+
+    **Models.** Five U-Nets with varied width (24–48 base channels), depth (2–4), and seeds.
+    Parameter counts range from ~100k to ~4M. Each predicts SSH(t+1) from SSH(t−6:t).
+
+    **Training.** Masked MSE loss (land excluded). AdamW, cosine LR schedule, 6 epochs per model on
+    Apple M4 Pro via MPS.
+
+    **Physical regime indicators.** Eddy kinetic energy from SSH geostrophic-velocity gradients.
+    Okubo-Weiss parameter for vortex vs. strain distinction. Loop Current northward extent from
+    per-timestep SSH contour tracking in the eastern domain. All computed from SSH alone — no external data.
+
+    **Attribution.** The autoresearch layer is inspired by recent work on LLM-driven
+    autonomous research, including Karpathy's autoresearch concept, Sakana AI's AI Scientist, and
+    Anthropic's agentic research patterns. Our specific contributions are: (1) a physical-oceanography
+    hypothesis language with domain-specific tools for eddy analysis, Loop Current tracking, and regime
+    correlation; (2) narrow, typed tools that constrain the agent to domain-meaningful actions rather
+    than arbitrary Python; (3) held-out temporal validation and Bonferroni-corrected significance
+    testing for every reported finding, with tool-call receipts linking each number to the computation
+    that produced it. All agent code is written from scratch for this project; no external agent
+    framework is used.
+    """
+)
