@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Model Diagnostics</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --blue-900: #0f1e3d;
+      --blue-600: #1d4ed8;
+      --blue-500: #3b82f6;
+      --blue-400: #60a5fa;
+      --blue-100: #dbeafe;
+      --blue-50:  #eff6ff;
+      --slate-900: #0f172a;
+      --slate-700: #334155;
+      --slate-500: #64748b;
+      --slate-300: #cbd5e1;
+      --slate-200: #e2e8f0;
+      --slate-100: #f1f5f9;
+      --slate-50:  #f8fafc;
+      --white: #ffffff;
+      --success: #16a34a;
+      --success-bg: #dcfce7;
+      --error: #dc2626;
+      --error-bg: #fee2e2;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow-lg: 0 8px 32px rgba(0,0,0,.12);
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: linear-gradient(135deg, var(--blue-900) 0%, var(--slate-900) 60%, #0d1b2a 100%);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      color: var(--slate-900);
+    }
+
+    /* ── Nav ── */
+    nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 40px;
+      background: rgba(255,255,255,.04);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+    }
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+    }
+    .nav-icon {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, var(--blue-500), var(--blue-400));
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .nav-icon svg { width: 18px; height: 18px; }
+    .nav-title { color: var(--white); font-weight: 600; font-size: 1.05rem; letter-spacing: -.2px; }
+    .nav-badge {
+      background: rgba(59,130,246,.25);
+      color: var(--blue-400);
+      border: 1px solid rgba(59,130,246,.3);
+      font-size: .7rem;
+      font-weight: 600;
+      padding: 2px 10px;
+      border-radius: 20px;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      text-align: center;
+      padding: 56px 20px 40px;
+      color: var(--white);
+    }
+    .hero-eyebrow {
+      display: inline-block;
+      background: rgba(59,130,246,.15);
+      border: 1px solid rgba(59,130,246,.25);
+      color: var(--blue-400);
+      font-size: .75rem;
+      font-weight: 600;
+      padding: 5px 14px;
+      border-radius: 20px;
+      margin-bottom: 20px;
+      letter-spacing: .5px;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      font-size: clamp(1.9rem, 4vw, 2.8rem);
+      font-weight: 700;
+      line-height: 1.15;
+      letter-spacing: -.5px;
+      margin-bottom: 14px;
+    }
+    .hero h1 span { color: var(--blue-400); }
+    .hero p {
+      font-size: 1rem;
+      color: rgba(255,255,255,.55);
+      max-width: 500px;
+      margin: 0 auto;
+      line-height: 1.65;
+    }
+
+    /* ── Main card ── */
+    main {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      padding: 0 20px 60px;
+    }
+    .card {
+      background: var(--white);
+      border-radius: 20px;
+      box-shadow: var(--shadow-lg);
+      width: 100%;
+      max-width: 720px;
+      overflow: hidden;
+    }
+    .card-header {
+      background: linear-gradient(90deg, var(--blue-50), var(--white));
+      border-bottom: 1px solid var(--slate-100);
+      padding: 24px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .card-header-icon {
+      width: 40px; height: 40px;
+      background: var(--blue-100);
+      border-radius: var(--radius-sm);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .card-header-icon svg { width: 20px; height: 20px; }
+    .card-header h2 { font-size: 1.05rem; font-weight: 600; color: var(--slate-900); }
+    .card-header p  { font-size: .82rem; color: var(--slate-500); margin-top: 2px; }
+    .card-body { padding: 32px; }
+
+    /* ── Steps ── */
+    .steps {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 32px;
+    }
+    .step {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      position: relative;
+    }
+    .step:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      top: 14px;
+      left: calc(50% + 14px);
+      right: calc(-50% + 14px);
+      height: 2px;
+      background: var(--slate-100);
+    }
+    .step-num {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: var(--blue-600);
+      color: var(--white);
+      font-size: .75rem;
+      font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1;
+    }
+    .step-label { font-size: .72rem; color: var(--blue-600); text-align: center; font-weight: 600; }
+
+    /* ── Form fields ── */
+    .field { margin-bottom: 24px; }
+    .field > label {
+      display: block;
+      font-size: .83rem;
+      font-weight: 600;
+      color: var(--slate-700);
+      margin-bottom: 5px;
+    }
+    .required { color: var(--error); }
+    .field-hint { font-size: .76rem; color: var(--slate-500); margin-bottom: 8px; }
+
+    textarea {
+      width: 100%;
+      border: 1.5px solid var(--slate-300);
+      border-radius: var(--radius-sm);
+      padding: 11px 14px;
+      font-family: inherit;
+      font-size: .9rem;
+      color: var(--slate-900);
+      background: var(--white);
+      transition: border-color .15s, box-shadow .15s;
+      outline: none;
+      resize: vertical;
+      min-height: 120px;
+      line-height: 1.6;
+    }
+    textarea:focus {
+      border-color: var(--blue-500);
+      box-shadow: 0 0 0 3px rgba(59,130,246,.12);
+    }
+
+    /* ── Drop zones ── */
+    .dropzone {
+      border: 2px dashed var(--slate-300);
+      border-radius: var(--radius);
+      padding: 28px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all .2s;
+      position: relative;
+      background: var(--slate-50);
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--blue-500);
+      background: var(--blue-50);
+    }
+    .dropzone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+    .dropzone-icon {
+      width: 36px; height: 36px;
+      background: var(--slate-200);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 10px;
+    }
+    .dropzone-icon svg { width: 18px; height: 18px; color: var(--slate-500); }
+    .dropzone-text { font-size: .86rem; color: var(--slate-700); font-weight: 500; margin-bottom: 3px; }
+    .dropzone-text span { color: var(--blue-600); }
+    .dropzone-sub { font-size: .74rem; color: var(--slate-500); }
+
+    .file-pill {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      background: var(--success-bg);
+      border: 1.5px solid #86efac;
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      margin-top: 8px;
+    }
+    .file-pill.show { display: flex; }
+    .file-pill-name { font-size: .84rem; font-weight: 500; color: var(--success); flex: 1; }
+    .file-pill-size { font-size: .76rem; color: #4ade80; }
+    .file-remove {
+      background: none; border: none; cursor: pointer;
+      color: var(--slate-400); font-size: .95rem; padding: 2px; line-height: 1;
+    }
+    .file-remove:hover { color: var(--error); }
+
+    /* ── Char counter ── */
+    .field-footer { display: flex; justify-content: flex-end; margin-top: 6px; }
+    .char-count { font-size: .74rem; color: var(--slate-400); }
+    .char-count.warn { color: #f59e0b; }
+
+    /* ── Submit ── */
+    .btn-submit {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, var(--blue-600), var(--blue-500));
+      color: var(--white);
+      border: none;
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+      font-size: .95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all .2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      letter-spacing: -.1px;
+      box-shadow: 0 2px 8px rgba(29,78,216,.25);
+    }
+    .btn-submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(29,78,216,.35); }
+    .btn-submit:active:not(:disabled) { transform: translateY(0); }
+    .btn-submit:disabled { opacity: .6; cursor: not-allowed; }
+    .spinner {
+      width: 16px; height: 16px;
+      border: 2px solid rgba(255,255,255,.3);
+      border-top-color: var(--white);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Response ── */
+    .response-panel {
+      display: none;
+      margin-top: 24px;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      border: 1.5px solid var(--slate-200);
+    }
+    .response-panel.show { display: block; }
+    .response-panel.success { border-color: #86efac; }
+    .response-panel.error   { border-color: #fca5a5; }
+    .response-header {
+      padding: 11px 16px;
+      font-size: .83rem;
+      font-weight: 600;
+    }
+    .response-panel.success .response-header { background: var(--success-bg); color: var(--success); }
+    .response-panel.error   .response-header { background: var(--error-bg);   color: var(--error);   }
+    .response-body {
+      padding: 16px;
+      font-size: .85rem;
+      line-height: 1.7;
+      color: var(--slate-700);
+      background: var(--white);
+    }
+    .response-row { display: flex; gap: 10px; margin-bottom: 5px; }
+    .response-row:last-child { margin-bottom: 0; }
+    .response-key { font-weight: 600; color: var(--slate-400); min-width: 80px; font-size: .78rem; text-transform: uppercase; letter-spacing: .3px; }
+    .response-val { color: var(--slate-800); }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      padding: 20px;
+      font-size: .75rem;
+      color: rgba(255,255,255,.25);
+    }
+
+    @media (max-width: 600px) {
+      nav { padding: 14px 20px; }
+      .hero { padding: 36px 16px 28px; }
+      .card-body { padding: 20px; }
+      .card-header { padding: 18px 20px; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <a class="nav-brand" href="#">
+    <div class="nav-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+      </svg>
+    </div>
+    <span class="nav-title">Model Diagnostics</span>
+  </a>
+  <span class="nav-badge">Research Tool</span>
+</nav>
+
+<section class="hero">
+  <div class="hero-eyebrow">AI-Powered Analysis</div>
+  <h1>Interpret Your <span>Model Output</span></h1>
+  <p>Upload a trained model and a dataset, then describe what you want to know. GPT will handle the interpretation.</p>
+</section>
+
+<main>
+  <div class="card">
+    <div class="card-header">
+      <div class="card-header-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
+        </svg>
+      </div>
+      <div>
+        <h2>New Session</h2>
+        <p>Complete all three steps to run your analysis</p>
+      </div>
+    </div>
+
+    <div class="card-body">
+      <div class="steps">
+        <div class="step"><div class="step-num">1</div><div class="step-label">Upload Model</div></div>
+        <div class="step"><div class="step-num">2</div><div class="step-label">Upload Data</div></div>
+        <div class="step"><div class="step-num">3</div><div class="step-label">Write Prompt</div></div>
+      </div>
+
+      <form id="analysisForm" enctype="multipart/form-data">
+
+        <!-- Step 1 — Model file -->
+        <div class="field">
+          <label>Model File <span class="required">*</span></label>
+          <div class="field-hint">Accepted: pkl · joblib · h5 · pt · pth · onnx · bin · model</div>
+          <div class="dropzone" id="modelDropzone">
+            <input type="file" name="modelfile" id="modelInput" accept=".pkl,.joblib,.h5,.pt,.pth,.onnx,.bin,.model"/>
+            <div class="dropzone-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+              </svg>
+            </div>
+            <div class="dropzone-text"><span>Click to browse</span> or drag and drop</div>
+            <div class="dropzone-sub">Serialized model file</div>
+          </div>
+          <div class="file-pill" id="modelPill">
+            <span class="file-pill-name" id="modelPillName"></span>
+            <span class="file-pill-size" id="modelPillSize"></span>
+            <button type="button" class="file-remove" data-target="model">✕</button>
+          </div>
+        </div>
+
+        <!-- Step 2 — Data file -->
+        <div class="field">
+          <label>Data File <span class="required">*</span></label>
+          <div class="field-hint">Accepted: CSV · JSON · XLSX · TXT · Parquet &mdash; up to 1 GB</div>
+          <div class="dropzone" id="dataDropzone">
+            <input type="file" name="datafile" id="dataInput" accept=".csv,.json,.xlsx,.txt,.parquet"/>
+            <div class="dropzone-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+              </svg>
+            </div>
+            <div class="dropzone-text"><span>Click to browse</span> or drag and drop</div>
+            <div class="dropzone-sub">Tabular or structured data</div>
+          </div>
+          <div class="file-pill" id="dataPill">
+            <span class="file-pill-name" id="dataPillName"></span>
+            <span class="file-pill-size" id="dataPillSize"></span>
+            <button type="button" class="file-remove" data-target="data">✕</button>
+          </div>
+        </div>
+
+        <!-- Step 3 — Prompt -->
+        <div class="field">
+          <label>Prompt <span class="required">*</span></label>
+          <div class="field-hint">Describe what you want GPT to analyze or explain about the model output.</div>
+          <textarea
+            name="prompt"
+            id="promptInput"
+            placeholder="e.g. What are the most significant predictors in this model, and how do they interact with each other?"
+            maxlength="2000"
+          ></textarea>
+          <div class="field-footer">
+            <span class="char-count" id="charCount">0 / 2000</span>
+          </div>
+        </div>
+
+        <button type="submit" class="btn-submit" id="submitBtn">
+          <span id="submitLabel">Run Analysis</span>
+          <span>&rarr;</span>
+          <div class="spinner" id="spinner"></div>
+        </button>
+      </form>
+
+      <div class="response-panel" id="responsePanel">
+        <div class="response-header" id="responseHeader"></div>
+        <div class="response-body" id="responseBody"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>Model Diagnostics &middot; Research Tool &middot; 2026</footer>
+
+<script>
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  }
+
+  function setupDropzone(dropzoneId, inputId, pillId, pillNameId, pillSizeId) {
+    const dropzone  = document.getElementById(dropzoneId);
+    const input     = document.getElementById(inputId);
+    const pill      = document.getElementById(pillId);
+    const pillName  = document.getElementById(pillNameId);
+    const pillSize  = document.getElementById(pillSizeId);
+
+    function showFile(file) {
+      pillName.textContent = file.name;
+      pillSize.textContent = formatSize(file.size);
+      pill.classList.add('show');
+      dropzone.style.display = 'none';
+    }
+
+    function clearFile() {
+      input.value = '';
+      pill.classList.remove('show');
+      dropzone.style.display = '';
+    }
+
+    input.addEventListener('change', () => { if (input.files[0]) showFile(input.files[0]); });
+
+    pill.querySelector('.file-remove').addEventListener('click', clearFile);
+
+    dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+    dropzone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropzone.classList.remove('dragover');
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files;
+        showFile(file);
+      }
+    });
+  }
+
+  setupDropzone('modelDropzone', 'modelInput', 'modelPill', 'modelPillName', 'modelPillSize');
+  setupDropzone('dataDropzone',  'dataInput',  'dataPill',  'dataPillName',  'dataPillSize');
+
+  const promptInput = document.getElementById('promptInput');
+  const charCount   = document.getElementById('charCount');
+  promptInput.addEventListener('input', () => {
+    const len = promptInput.value.length;
+    charCount.textContent = `${len} / 2000`;
+    charCount.classList.toggle('warn', len > 1800);
+  });
+
+  const form          = document.getElementById('analysisForm');
+  const submitBtn     = document.getElementById('submitBtn');
+  const submitLabel   = document.getElementById('submitLabel');
+  const spinner       = document.getElementById('spinner');
+  const responsePanel = document.getElementById('responsePanel');
+  const responseHeader = document.getElementById('responseHeader');
+  const responseBody  = document.getElementById('responseBody');
+
+  function setLoading(on) {
+    submitBtn.disabled = on;
+    submitLabel.textContent = on ? 'Analyzing\u2026' : 'Run Analysis';
+    spinner.style.display = on ? 'block' : 'none';
+  }
+
+  function showResponse(type, data) {
+    responsePanel.className = `response-panel show ${type}`;
+    if (type === 'success') {
+      responseHeader.textContent = 'Request received';
+      responseBody.innerHTML = `
+        <div class="response-row"><span class="response-key">Model</span><span class="response-val">${data.model_file}</span></div>
+        <div class="response-row"><span class="response-key">Data</span><span class="response-val">${data.data_file}</span></div>
+        <div class="response-row"><span class="response-key">Prompt</span><span class="response-val">${data.prompt}</span></div>
+        <div class="response-row"><span class="response-key">Status</span><span class="response-val">${data.message}</span></div>
+      `;
+    } else {
+      responseHeader.textContent = 'Error';
+      responseBody.innerHTML = `<div>${data.error || 'An unexpected error occurred.'}</div>`;
+    }
+    responsePanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    setLoading(true);
+    responsePanel.className = 'response-panel';
+    try {
+      const res  = await fetch('/api/analyze', { method: 'POST', body: new FormData(form) });
+      const data = await res.json();
+      showResponse(res.ok ? 'success' : 'error', data);
+    } catch {
+      showResponse('error', { error: 'Could not reach the server. Is Flask running?' });
+    } finally {
+      setLoading(false);
+    }
+  });
+</script>
+</body>
+</html>
